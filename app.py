@@ -345,6 +345,13 @@ if config.APP_PASSWORD and not ss.get("authed"):
 
 
 @st.cache_resource
+def _build_slots():
+    """Shared by all visitors: limits how many CAD builds run at once (memory on small free hosts)."""
+    import threading
+    return threading.Semaphore(max(config.MAX_PARALLEL_BUILDS, 1))
+
+
+@st.cache_resource
 def _build_log() -> dict:
     """Shared across all visitors of this server: client key -> recent build timestamps."""
     return {}
@@ -408,7 +415,18 @@ def run_build(text: str, marks_text: str = "") -> bool:
         if gen is not None and getattr(gen, "messages", None):
             fresh.messages = gen.messages
         gen = ss.gen = fresh
-    work_dir = Path(tempfile.mkdtemp(prefix="text2cad_"))
+    slots = _build_slots()
+    if not slots.acquire(blocking=False):
+        with st.spinner("Another part is being drafted right now, you're next in line…"):
+            slots.acquire()
+    try:
+        return _run_build_locked(text, marks_text, f, gen, print_mode)
+    finally:
+        slots.release()
+
+
+def _run_build_locked(text: str, marks_text: str, f: dict | None, gen, print_mode: bool) -> bool:
+    work_dir = Path(tempfile.mkdtemp(prefix="fillet_"))
     # Technical details (model switches, tracebacks) are kept in `log` for debugging but never shown;
     # the user only sees a friendly, changing status line.
     log: list[str] = []

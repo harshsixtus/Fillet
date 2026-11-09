@@ -92,22 +92,28 @@ Then open http://localhost:7860. Saved models persist in `./library`.
 
 ## Deploy (free, public link for your portfolio)
 
-The repo is ready for a **Hugging Face Space** (Docker SDK; the header at the top of this README configures it).
+**Streamlit Community Cloud** (free; deploys straight from this GitHub repo)
 
-1. Create a Space at https://huggingface.co/new-space: pick **Docker** as the SDK, then **Blank**.
-2. In the Space **Settings -> Variables and secrets**, add secrets `GROQ_API_KEY` (and optionally `MISTRAL_API_KEY`,
-   `APP_PASSWORD` to make it private).
-3. Push this repo to the Space:
+1. Go to https://share.streamlit.io, sign in with GitHub and click **Create app**, then **Deploy a public app from GitHub**.
+2. Repository `harshsixtus/Fillet`, branch `main`, main file `app.py`. Pick a URL such as `fillet.streamlit.app`.
+3. Open **Advanced settings**: set **Python version 3.11**, and paste your keys into **Secrets** (TOML):
 
-   ```bash
-   git remote add space https://huggingface.co/spaces/<your-username>/fillet
-   git push space main
+   ```toml
+   GROQ_API_KEY = "your-groq-key"
+   MISTRAL_API_KEY = "your-mistral-key"   # optional fallback
+   # APP_PASSWORD = "choose-one"          # optional: make the demo private
    ```
 
-The Space builds the `Dockerfile` and serves the app at `https://huggingface.co/spaces/<your-username>/fillet`.
-In a Space, server mode turns on automatically: a per-visitor limit of 12 builds/hour (`MAX_BUILDS_PER_HOUR`),
-an optional password, and buttons that act on the host computer ("open in my CAD app") are hidden.
-Note: the free Space disk is not persistent, so the model library resets when the Space restarts.
+4. Click **Deploy**. The first build takes a few minutes (it installs CadQuery plus the system libraries in `packages.txt`).
+
+Server mode turns on automatically there: one build at a time (a heavy build peaks at ~0.6 GB, the free tier has ~1 GB),
+12 builds/hour per visitor, an optional password, no API keys visible to the sandbox, and local-only buttons hidden.
+Free apps sleep after a period without visitors (the next visitor wakes them in under a minute), and the model library
+resets when the app restarts.
+
+**Any Docker host** (Google Cloud Run, Render, Railway, Fly.io, a VPS, or a paid Hugging Face Space): the included
+`Dockerfile` serves the app on port 7860; provide `GROQ_API_KEY` (and optionally `MISTRAL_API_KEY`, `APP_PASSWORD`)
+as environment variables. The README header already contains the Hugging Face Space settings.
 
 ## Evaluation
 
