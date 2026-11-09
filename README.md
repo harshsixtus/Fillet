@@ -1,11 +1,11 @@
----
+﻿---
 title: Fillet
 colorFrom: gray
 colorTo: green
 sdk: docker
 app_port: 7860
 pinned: false
-short_description: Describe a mechanical part in plain English, get an editable CAD model
+short_description: Describe a part in plain English, get editable CAD.
 ---
 
 # Fillet
