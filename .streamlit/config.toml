@@ -1,0 +1,14 @@
+[theme]
+base = "dark"
+primaryColor = "#6FA08E"
+backgroundColor = "#0E0E0D"
+secondaryBackgroundColor = "#1F1F1D"
+textColor = "#EDEBE6"
+font = "Inter Tight:https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&display=swap"
+headingFont = "Inter Tight:https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&display=swap"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

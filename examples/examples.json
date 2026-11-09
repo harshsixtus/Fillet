@@ -1,0 +1,37 @@
+[
+  {
+    "id": 1,
+    "name": "Block with hole",
+    "difficulty": "easy",
+    "prompt": "A 40 x 30 x 20 mm rectangular block with a 10 mm diameter through-hole drilled vertically (along the 20 mm height) through its center.",
+    "expected_bbox_mm": [40, 30, 20]
+  },
+  {
+    "id": 2,
+    "name": "Flanged bushing",
+    "difficulty": "medium",
+    "prompt": "A flanged bushing with its axis along Z: a cylindrical body of 20 mm outer diameter, a flange of 30 mm outer diameter and 4 mm thickness at one end, 25 mm total length including the flange, and a 12 mm diameter bore running through the full length.",
+    "expected_bbox_mm": [30, 30, 25]
+  },
+  {
+    "id": 3,
+    "name": "L-bracket with fillets and holes",
+    "difficulty": "medium-hard",
+    "prompt": "An L-bracket 20 mm wide, 4 mm thick. The horizontal leg is 50 mm long and the vertical leg is 40 mm tall (outer dimensions). The inside corner has a 4 mm fillet and the outside corner an 8 mm fillet. Each leg has two 5 mm diameter through-holes centered across the width, placed 10 mm and 30 mm along the leg from the free end for the horizontal leg, and 10 mm and 25 mm from the free end for the vertical leg.",
+    "expected_bbox_mm": [50, 20, 40]
+  },
+  {
+    "id": 4,
+    "name": "Spur-gear-like disk",
+    "difficulty": "hard",
+    "prompt": "A spur-gear-like disk with 12 rectangular teeth, 8 mm thick. Root (body) diameter 40 mm, tip (outer) diameter 50 mm, so each tooth is 5 mm tall radially and about 5 mm wide, evenly spaced around the circumference, with one tooth centered on the +X axis. A 10 mm diameter center bore goes through.",
+    "expected_bbox_mm": [50, 50, 8]
+  },
+  {
+    "id": 5,
+    "name": "Enclosure box with lid lip",
+    "difficulty": "hard",
+    "prompt": "An open-top rectangular enclosure box, 80 x 50 x 30 mm overall (height 30 mm), with 2.5 mm thick walls and a 2.5 mm thick floor. Around the top rim, the inner half of the wall thickness (1.25 mm) is stepped down by 2 mm to form a lid lip/rabbet. Single solid, the four vertical outside edges filleted with 3 mm radius.",
+    "expected_bbox_mm": [80, 50, 30]
+  }
+]

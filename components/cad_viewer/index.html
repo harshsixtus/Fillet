@@ -1,0 +1,491 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin: 0; background: transparent; font-family: 'Inter Tight', system-ui, -apple-system, Segoe UI, sans-serif; overflow: hidden; }
+  #wrap { position: relative; width: 100%; height: 540px; border-radius: 14px; overflow: hidden; touch-action: none;
+    background: radial-gradient(ellipse at 50% 30%, #1B1B1A 0%, #0B0B0A 80%); border: 1px solid #2A2927; }
+  #wrap.pen { border-color: #D27A52; }
+  #gl, #ink { position: absolute; inset: 0; }
+  #ink { pointer-events: none; }
+  #wrap.pen #ink { pointer-events: auto; cursor: crosshair; }
+  #bar { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 5; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 170px); }
+  #bar button { background: rgba(23,23,22,.92); color: #EDEBE6; border: 1px solid #2A2927; font-family: inherit;
+    border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; transition: all .15s; }
+  #bar button:hover { border-color: #8C8880; }
+  #bar button.on { border-color: #6FA08E; color: #6FA08E; background: rgba(111,160,142,.10); }
+  #bar button#pen.on { border-color: #D27A52; color: #D27A52; background: rgba(210,122,82,.10); }
+  #dims { position: absolute; left: 12px; top: 10px; color: #EDEBE6; font-size: 12px; z-index: 5;
+    background: rgba(23,23,22,.92); padding: 5px 10px; border-radius: 8px; border: 1px solid #2A2927; }
+  .cn { position: absolute; width: 14px; height: 14px; border-color: #3a3936; border-style: solid; border-width: 0; z-index: 4; pointer-events: none; }
+  .cn.tl { left: 8px; top: 8px; border-left-width: 1px; border-top-width: 1px; }
+  .cn.tr { right: 8px; top: 8px; border-right-width: 1px; border-top-width: 1px; }
+  .cn.bl { left: 8px; bottom: 8px; border-left-width: 1px; border-bottom-width: 1px; }
+  .cn.br { right: 8px; bottom: 8px; border-right-width: 1px; border-bottom-width: 1px; }
+  #dims, #hint, #toast { font-family: "JetBrains Mono", ui-monospace, monospace; letter-spacing: .02em; }
+  #bar button { font-size: 11.5px; }
+  #hint { position: absolute; left: 12px; bottom: 10px; color: #8C8880; font-size: 12px; z-index: 5; pointer-events: none; }
+  #toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; font-size: 12px;
+    background: #EDEBE6; color: #0E0E0D; border: 1px solid #EDEBE6; padding: 6px 12px;
+    border-radius: 999px; opacity: 0; transition: opacity .25s; pointer-events: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="gl"></canvas>
+  <canvas id="ink"></canvas>
+  <div class="cn tl"></div><div class="cn tr"></div><div class="cn bl"></div><div class="cn br"></div>
+  <div id="dims"></div>
+  <div id="bar">
+    <button id="pen" title="Draw on the model to mark a problem. Rough circles, boxes and arrows snap to clean shapes. Drag a mark to move it.">Mark</button>
+    <button id="undo" title="Remove the last mark">Undo</button>
+    <button id="clear" title="Remove all marks">Clear</button>
+    <button id="dimsbtn" class="on" title="Show / hide measurements">Dimensions</button>
+    <button id="rot" class="on">Rotate</button>
+    <button id="wire">Wireframe</button>
+    <button id="reset">Reset view</button>
+  </div>
+  <div id="hint"></div>
+  <div id="toast"></div>
+</div>
+
+<script type="importmap">{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from "three";
+import {OrbitControls} from "three/addons/controls/OrbitControls.js";
+import {STLLoader} from "three/addons/loaders/STLLoader.js";
+
+/* ---------------- Streamlit component protocol (no build step needed) ---------------- */
+const send = (type, data = {}) => window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
+const setValue = (value) => send("streamlit:setComponentValue", {value, dataType: "json"});
+send("streamlit:componentReady", {apiVersion: 1});
+send("streamlit:setFrameHeight", {height: 552});
+
+/* ---------------- scene ---------------- */
+const $ = (id) => document.getElementById(id);
+const wrap = $("wrap"), gl = $("gl"), ink = $("ink");
+const ictx = ink.getContext("2d");
+let W = wrap.clientWidth, H = wrap.clientHeight;
+const renderer = new THREE.WebGLRenderer({canvas: gl, antialias: true, alpha: true});
+renderer.setPixelRatio(window.devicePixelRatio);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, W / H, 0.1, 100000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x2a2a28, 1.05));
+const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(3, 5, 4); scene.add(key);
+const rim = new THREE.DirectionalLight(0xffffff, 0.45); rim.position.set(-4, 2, -3); scene.add(rim);
+
+const controls = new OrbitControls(camera, gl);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.7; controls.panSpeed = 0.6;
+controls.enableZoom = false;              // replaced by the smooth zoom-to-cursor below
+controls.autoRotate = true; controls.autoRotateSpeed = 1.6;
+
+const group = new THREE.Group(); group.rotation.x = -Math.PI / 2; scene.add(group);   // CAD Z-up -> three Y-up
+let mesh = null, edges = null, grid = null, axes = null, mat = null;
+let modelId = null, r = 50, minD = 1, maxD = 1000;
+const home = new THREE.Vector3(), cadCenter = new THREE.Vector3();
+
+function resize() {
+  if (!wrap.clientWidth || !wrap.clientHeight) return;   // not laid out yet: keep the last good size
+  W = wrap.clientWidth; H = wrap.clientHeight;
+  renderer.setSize(W, H, false); camera.aspect = W / H; camera.updateProjectionMatrix();
+  const dpr = window.devicePixelRatio;
+  ink.width = W * dpr; ink.height = H * dpr; ink.style.width = W + "px"; ink.style.height = H + "px";
+  ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+// the iframe can change size without a window resize (layout, tabs, drawer): keep 3D and overlay in sync
+new ResizeObserver(resize).observe(wrap);
+
+function loadModel(b64) {
+  if (mesh) { group.remove(mesh); group.remove(edges); scene.remove(grid); group.remove(axes); }
+  marks = [];
+  const bin = atob(b64); const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  const geo = new STLLoader().parse(buf.buffer);
+  geo.computeBoundingBox(); geo.boundingBox.getCenter(cadCenter);   // remember true CAD coordinates
+  geo.computeVertexNormals(); geo.center();
+  mat = new THREE.MeshStandardMaterial({color: 0xA7AFB2, metalness: 0.3, roughness: 0.5});
+  mesh = new THREE.Mesh(geo, mat); group.add(mesh);
+  edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 28),
+    new THREE.LineBasicMaterial({color: 0x0a0a0a, transparent: true, opacity: .5}));
+  group.add(edges);
+  geo.computeBoundingSphere(); geo.computeBoundingBox();
+  r = geo.boundingSphere.radius; const bb = geo.boundingBox;
+  grid = new THREE.GridHelper(r * 6, 24, 0x34332f, 0x222120);
+  grid.position.y = -(bb.max.z - bb.min.z) / 2 - r * 0.001; scene.add(grid);
+  // axes in the CAD frame (inside the rotated group): red = X, green = Y, blue = Z (up)
+  // small axis marker just off the part's corner (not far away in empty space)
+  const pad = Math.max(r * 0.08, 2);
+  axes = new THREE.AxesHelper(r * 0.35); axes.position.set(bb.min.x - pad, bb.min.y - pad, bb.min.z); group.add(axes);
+  axes.setColors(new THREE.Color(0xD27A52), new THREE.Color(0x6FA08E), new THREE.Color(0x8C8880));
+  home.set(r * 2.9, r * 2.1, r * 3.2);   // a little room around the part for the dimension labels
+  camera.position.copy(home); controls.target.set(0, 0, 0); controls.update();
+  minD = r * 0.35; maxD = r * 12;
+}
+
+/* ---------------- smooth zoom toward the cursor (works in pen mode too) ---------------- */
+let zoomAcc = 0;
+const zoomPivot = new THREE.Vector3();
+const ray = new THREE.Raycaster();
+const tmpV = new THREE.Vector3();
+
+wrap.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  let dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+  dy = Math.max(-100, Math.min(100, dy));           // tame fast wheels and trackpad bursts
+  zoomAcc += dy * 0.0011;                            // log-space: ~11% per normal wheel notch
+  zoomAcc = Math.max(-0.6, Math.min(0.6, zoomAcc));
+  const rect = wrap.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const hit = mesh && pick(x, y);
+  if (hit) zoomPivot.copy(hit.point);
+  else {   // empty space: pivot on the plane through the orbit target, facing the camera
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmpV).negate(), controls.target);
+    if (!ray.ray.intersectPlane(plane, zoomPivot)) zoomPivot.copy(controls.target);
+  }
+  stopAutoRotate();
+}, {passive: false});
+
+let lastT = performance.now();
+function applyZoom() {
+  const now = performance.now(), dt = Math.min((now - lastT) / 1000, 0.25); lastT = now;
+  if (Math.abs(zoomAcc) < 1e-4) { zoomAcc = 0; return; }
+  const step = zoomAcc * (1 - Math.exp(-dt * 14)); zoomAcc -= step;   // time-based ease-out (~0.25 s)
+  const dist = camera.position.distanceTo(controls.target);
+  if (!isFinite(dist) || dist <= 0) { zoomAcc = 0; return; }
+  const nd = THREE.MathUtils.clamp(dist * Math.exp(step), minD, maxD);
+  const k = nd / dist;
+  if (Math.abs(k - 1) < 1e-6) { zoomAcc = 0; return; }
+  camera.position.sub(zoomPivot).multiplyScalar(k).add(zoomPivot);
+  controls.target.sub(zoomPivot).multiplyScalar(k).add(zoomPivot);
+}
+
+/* ---------------- toolbar ---------------- */
+let penMode = false;
+function stopAutoRotate() { controls.autoRotate = false; $("rot").classList.remove("on"); }
+$("rot").onclick = () => { controls.autoRotate = !controls.autoRotate; $("rot").classList.toggle("on", controls.autoRotate); };
+$("wire").onclick = () => { mat.wireframe = !mat.wireframe; edges.visible = !mat.wireframe; $("wire").classList.toggle("on", mat.wireframe); };
+$("reset").onclick = () => { zoomAcc = 0; camera.position.copy(home); controls.target.set(0, 0, 0); };
+$("pen").onclick = () => setPen(!penMode);
+let showDims = true;
+$("dimsbtn").onclick = () => { showDims = !showDims; $("dimsbtn").classList.toggle("on", showDims); };
+$("undo").onclick = () => { if (marks.pop()) publish(); };
+$("clear").onclick = () => { marks = []; publish(); };
+gl.addEventListener("pointerdown", stopAutoRotate);
+
+function setHint() {
+  $("hint").textContent = penMode
+    ? "draw a circle, box or arrow on the problem · drag a mark to move it · scroll to zoom"
+    : "drag: rotate · scroll: zoom to cursor · right-drag: pan";
+}
+function setPen(on) {
+  penMode = on; wrap.classList.toggle("pen", on); $("pen").classList.toggle("on", on);
+  controls.enabled = !on;
+  if (on) stopAutoRotate();
+  setHint();
+}
+setHint();
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.opacity = 0, 2400);
+}
+
+/* ---------------- marks: anchored on the surface, sized in mm ---------------- */
+// mark = {n, shape, local: Vector3 (mesh frame), normal:[...], dims:{...mm}, point:[cad mm], size_mm}
+let marks = [];
+
+function pick(x, y) {
+  ray.setFromCamera(new THREE.Vector2((x / W) * 2 - 1, -(y / H) * 2 + 1), camera);
+  return mesh ? (ray.intersectObject(mesh, false)[0] || null) : null;
+}
+
+function project(local) {   // -> {x, y, pxPerMm, behind}
+  const world = mesh.localToWorld(local.clone());
+  const dist = camera.position.distanceTo(world);
+  const p = world.clone().project(camera);
+  const pxPerMm = H / (2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+  return {x: (p.x + 1) / 2 * W, y: (1 - p.y) / 2 * H, pxPerMm, behind: p.z > 1};
+}
+
+function mmPerPxAt(worldPoint) {
+  const dist = camera.position.distanceTo(worldPoint);
+  return 2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / H;
+}
+
+function hitNear(x, y, px) {   // raycast at (x, y); if it misses, search inside a radius
+  let hit = pick(x, y);
+  for (let k = 0; k < 24 && !hit && px > 0; k++) {
+    const a = (k / 24) * Math.PI * 2, rr = px * (k % 2 ? 0.5 : 0.85);
+    hit = pick(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+  }
+  return hit;
+}
+
+function setAnchor(m, hit) {
+  m.local = mesh.worldToLocal(hit.point.clone());
+  m.normal = hit.face.normal.toArray().map(v => +v.toFixed(3));
+  m.point = m.local.clone().add(cadCenter).toArray().map(v => +v.toFixed(2));
+}
+
+function addMark(s) {
+  // screen point the mark refers to (arrow head, or shape centre) and its size in px
+  const t = s.type === "arrow" ? {x: s.x2, y: s.y2, px: 0}
+          : s.type === "box" ? {x: s.x + s.w / 2, y: s.y + s.h / 2, px: Math.max(s.w, s.h) / 2}
+          : s.type === "circle" ? {x: s.cx, y: s.cy, px: s.r}
+          : {x: s.cx, y: s.cy, px: Math.max(s.rx, s.ry)};
+  const hit = hitNear(t.x, t.y, t.px);
+  if (!hit) { toast("That mark isn't on the part — draw on the model itself."); return; }
+  const mpp = mmPerPxAt(hit.point);
+  const dims = s.type === "arrow" ? {dx: (s.x1 - s.x2) * mpp, dy: (s.y1 - s.y2) * mpp}
+             : s.type === "box" ? {w: s.w * mpp, h: s.h * mpp}
+             : s.type === "circle" ? {r: s.r * mpp}
+             : {rx: s.rx * mpp, ry: s.ry * mpp};
+  // centre offset: the shape centre may not be exactly where the ray hit (searched hit)
+  const n = (marks.length ? marks[marks.length - 1].n : 0) + 1;
+  const m = {n, shape: s.type, dims, size_mm: +(t.px * mpp).toFixed(1)};
+  setAnchor(m, hit);
+  marks.push(m);
+  toast(`Mark #${n} added · drag it to move · describe the fix in the chat`);
+  publish();
+}
+
+/* screen-space geometry of a mark for drawing and hit-testing */
+function geom(m) {
+  const p = project(m.local), s = p.pxPerMm, d = m.dims || {r: m.size_mm || 3};
+  return {...p, s, d};
+}
+
+/* ---------------- live dimensions: overall width / depth / height on the outer edges ---------------- */
+const fmtMm = (v) => (Math.round(v * 10) / 10).toString();
+function drawDims() {
+  if (!showDims || !mesh) return;
+  const bb = mesh.geometry.boundingBox;
+  const lo = [bb.min.x, bb.min.y, bb.min.z], hi = [bb.max.x, bb.max.y, bb.max.z];
+  const c = project(new THREE.Vector3(0, 0, 0));
+  const used = [];
+  const names = ["X", "Y", "Z"];
+  for (let axis = 0; axis < 3; axis++) {
+    const len = hi[axis] - lo[axis];
+    if (len < 1e-6) continue;
+    const o = [0, 1, 2].filter(i => i !== axis);
+    let best = null;
+    for (const a of [lo, hi]) for (const b of [lo, hi]) {
+      const pa = [0, 0, 0], pb = [0, 0, 0];
+      pa[o[0]] = pb[o[0]] = a[o[0]]; pa[o[1]] = pb[o[1]] = b[o[1]];
+      pa[axis] = lo[axis]; pb[axis] = hi[axis];
+      // width & depth are measured on the ground footprint (z = bottom), height on a vertical corner edge
+      if (axis !== 2 && pa[2] !== lo[2]) continue;
+      const A = project(new THREE.Vector3(...pa)), B = project(new THREE.Vector3(...pb));
+      if (A.behind || B.behind) continue;
+      const dx = B.x - A.x, dy = B.y - A.y, seg = Math.hypot(dx, dy);
+      if (seg < 28) continue;                       // this axis points at the camera
+      const ux = dx / seg, uy = dy / seg;
+      let nx = -uy, ny = ux;
+      const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+      if ((mx - c.x) * nx + (my - c.y) * ny < 0) { nx = -nx; ny = -ny; }
+      const out = (mx - c.x) * nx + (my - c.y) * ny;
+      const clash = used.some(([px, py]) => Math.abs(px - nx) < .3 && Math.abs(py - ny) < .3);
+      let score;
+      if (axis !== 2) {
+        // width/depth: the footprint edge nearest the camera, so the line is never hidden behind the part
+        const mid = mesh.localToWorld(new THREE.Vector3((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, pa[2]));
+        score = -camera.position.distanceTo(mid) * 1000 / r + out * 0.01;
+      } else {
+        score = out + 25 * (0.6 * ny - 0.4 * nx);   // height: outermost vertical edge
+      }
+      if (clash) score -= 1e6;
+      if (!best || score > best.score) best = {score, A, B, ux, uy, nx, ny};
+    }
+    if (!best) continue;
+    const {A, B, ux, uy, nx, ny} = best;
+    used.push([nx, ny]);
+    const off = 22;
+    const a2 = [A.x + nx * off, A.y + ny * off], b2 = [B.x + nx * off, B.y + ny * off];
+    ictx.save();
+    ictx.strokeStyle = "rgba(111,160,142,.45)"; ictx.lineWidth = 1;
+    ictx.beginPath();   // extension lines
+    ictx.moveTo(A.x + nx * 4, A.y + ny * 4); ictx.lineTo(a2[0] + nx * 5, a2[1] + ny * 5);
+    ictx.moveTo(B.x + nx * 4, B.y + ny * 4); ictx.lineTo(b2[0] + nx * 5, b2[1] + ny * 5);
+    ictx.stroke();
+    ictx.strokeStyle = "#6FA08E"; ictx.lineWidth = 1.3;
+    ictx.beginPath(); ictx.moveTo(...a2); ictx.lineTo(...b2); ictx.stroke();
+    ictx.fillStyle = "#6FA08E";
+    for (const [p, sx, sy] of [[a2, -ux, -uy], [b2, ux, uy]]) {   // arrowheads
+      const L = 8, Wd = 3, bx = p[0] - sx * L, by = p[1] - sy * L;
+      ictx.beginPath(); ictx.moveTo(p[0], p[1]); ictx.lineTo(bx - sy * Wd, by + sx * Wd); ictx.lineTo(bx + sy * Wd, by - sx * Wd); ictx.fill();
+    }
+    // label pill
+    const label = `${fmtMm(len)} mm`;
+    const lx = (a2[0] + b2[0]) / 2 + nx * 14, ly = (a2[1] + b2[1]) / 2 + ny * 14;
+    ictx.font = "500 11px JetBrains Mono, ui-monospace, monospace";
+    const tw = ictx.measureText(label).width + 26;
+    ictx.fillStyle = "rgba(14,14,13,.92)"; ictx.strokeStyle = "#2F4A42"; ictx.lineWidth = 1;
+    ictx.beginPath(); ictx.roundRect ? ictx.roundRect(lx - tw / 2, ly - 11, tw, 22, 11) : ictx.rect(lx - tw / 2, ly - 11, tw, 22);
+    ictx.fill(); ictx.stroke();
+    ictx.fillStyle = "#EDEBE6"; ictx.textAlign = "center"; ictx.textBaseline = "middle";
+    ictx.fillText(label, lx + 6, ly + .5);
+    ictx.fillStyle = "#6FA08E";   // axis letter
+    ictx.font = "700 10px system-ui"; ictx.fillText(names[axis], lx - tw / 2 + 10, ly + .5);
+    ictx.restore();
+  }
+}
+
+function drawMarks() {
+  ictx.clearRect(0, 0, W, H);
+  if (!mesh) return;
+  drawDims();
+  for (const m of marks) {
+    const g = geom(m); if (g.behind) continue;
+    const {x, y, s, d} = g;
+    ictx.save();
+    ictx.strokeStyle = m === dragging?.m ? "#E9A585" : "#D27A52"; ictx.lineWidth = 2.5; ictx.lineCap = ictx.lineJoin = "round";
+    ictx.shadowBlur = 0;
+    ictx.beginPath();
+    let bx = x, by = y;   // where to put the number badge
+    if (m.shape === "circle") { const rr = Math.max(d.r * s, 6); ictx.arc(x, y, rr, 0, Math.PI * 2); bx = x + rr * .72; by = y - rr * .72; }
+    else if (m.shape === "ellipse") { const rx = Math.max(d.rx * s, 6), ry = Math.max(d.ry * s, 6); ictx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); bx = x + rx * .72; by = y - ry * .72; }
+    else if (m.shape === "box") { const w = Math.max(d.w * s, 10), h = Math.max(d.h * s, 10);
+      ictx.roundRect ? ictx.roundRect(x - w / 2, y - h / 2, w, h, 6) : ictx.rect(x - w / 2, y - h / 2, w, h); bx = x + w / 2; by = y - h / 2; }
+    else if (m.shape === "arrow") {
+      const x1 = x + d.dx * s, y1 = y + d.dy * s;
+      ictx.moveTo(x1, y1); ictx.lineTo(x, y);
+      const a = Math.atan2(y - y1, x - x1), hl = 14;
+      ictx.moveTo(x, y); ictx.lineTo(x - hl * Math.cos(a - .45), y - hl * Math.sin(a - .45));
+      ictx.moveTo(x, y); ictx.lineTo(x - hl * Math.cos(a + .45), y - hl * Math.sin(a + .45));
+      bx = x1; by = y1;
+    }
+    ictx.stroke(); ictx.shadowBlur = 0;
+    // number badge
+    ictx.fillStyle = "#D27A52"; ictx.beginPath(); ictx.arc(bx, by, 10, 0, Math.PI * 2); ictx.fill();
+    ictx.lineWidth = 2; ictx.strokeStyle = "#0E0E0D"; ictx.stroke();
+    ictx.fillStyle = "#0E0E0D"; ictx.font = "bold 11px system-ui"; ictx.textAlign = "center"; ictx.textBaseline = "middle";
+    ictx.fillText(m.n, bx, by + .5);
+    ictx.restore();
+  }
+  if (stroke) {   // the raw stroke while drawing
+    ictx.strokeStyle = "rgba(210,122,82,.6)"; ictx.lineWidth = 2; ictx.lineJoin = ictx.lineCap = "round";
+    ictx.beginPath(); stroke.forEach(([px, py], i) => i ? ictx.lineTo(px, py) : ictx.moveTo(px, py)); ictx.stroke();
+  }
+}
+
+function markAt(x, y) {   // topmost mark under the pointer
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const g = geom(marks[i]); if (g.behind) continue;
+    const {d, s} = g;
+    let rad;
+    if (marks[i].shape === "circle") rad = Math.max(d.r * s, 6);
+    else if (marks[i].shape === "ellipse") rad = Math.max(d.rx, d.ry) * s;
+    else if (marks[i].shape === "box") rad = Math.max(d.w, d.h) * s / 2;
+    else rad = 14;
+    if (Math.hypot(x - g.x, y - g.y) <= rad + 8) return {m: marks[i], g};
+  }
+  return null;
+}
+
+/* ---------------- pen: draw new marks, drag existing ones ---------------- */
+let stroke = null, dragging = null;
+ink.addEventListener("pointerdown", (e) => {
+  if (!penMode || e.button !== 0) return;
+  ink.setPointerCapture(e.pointerId);
+  const hitMark = markAt(e.offsetX, e.offsetY);
+  if (hitMark) {
+    dragging = {m: hitMark.m, offX: e.offsetX - hitMark.g.x, offY: e.offsetY - hitMark.g.y,
+                prev: {local: hitMark.m.local.clone(), normal: hitMark.m.normal, point: hitMark.m.point}};
+    ink.style.cursor = "grabbing";
+  } else {
+    stroke = [[e.offsetX, e.offsetY]];
+  }
+});
+ink.addEventListener("pointermove", (e) => {
+  if (dragging) {
+    const x = e.offsetX - dragging.offX, y = e.offsetY - dragging.offY;
+    const hit = pick(x, y);
+    if (hit) setAnchor(dragging.m, hit);   // follows the surface while dragging
+    return;
+  }
+  if (stroke) { stroke.push([e.offsetX, e.offsetY]); return; }
+  if (penMode) ink.style.cursor = markAt(e.offsetX, e.offsetY) ? "grab" : "crosshair";
+});
+ink.addEventListener("pointerup", (e) => {
+  if (dragging) {
+    const x = e.offsetX - dragging.offX, y = e.offsetY - dragging.offY;
+    if (!pick(x, y)) {   // dropped off the part: put it back
+      Object.assign(dragging.m, dragging.prev);
+      toast("Drop the mark on the part itself.");
+    } else {
+      toast(`Mark #${dragging.m.n} moved`);
+      publish();
+    }
+    dragging = null; ink.style.cursor = "grab";
+    return;
+  }
+  if (!stroke) return;
+  const pts = stroke; stroke = null;
+  if (pts.length >= 4) addMark(recognize(pts));
+});
+
+/* ---------------- shape recognition (snaps rough strokes to clean shapes) ---------------- */
+function recognize(pts) {
+  const n = pts.length;
+  let len = 0; for (let i = 1; i < n; i++) len += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]);
+  const [sx, sy] = pts[0], [ex, ey] = pts[n - 1];
+  const gap = Math.hypot(ex - sx, ey - sy);
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const bw = maxX - minX, bh = maxY - minY;
+
+  // Open stroke -> arrow pointing at the end of the stroke
+  if (gap > 0.35 * len || len < 25) return {type: "arrow", x1: sx, y1: sy, x2: ex, y2: ey};
+  // Closed stroke: rectangle if it fills its bounding box (ellipse ~0.785, rectangle ~1)
+  let area = 0; for (let i = 0; i < n; i++) { const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % n]; area += x1 * y2 - x2 * y1; }
+  const fill = Math.abs(area / 2) / Math.max(bw * bh, 1);
+  if (fill > 0.86) return {type: "box", x: minX, y: minY, w: bw, h: bh};
+  const aspect = Math.max(bw, bh) / Math.max(Math.min(bw, bh), 1);
+  if (aspect < 1.35) return {type: "circle", cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, r: (bw + bh) / 4};
+  return {type: "ellipse", cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, rx: bw / 2, ry: bh / 2};
+}
+
+/* ---------------- sync with Python ---------------- */
+function publish() {
+  setValue({model_id: modelId, marks: marks.map(m => ({
+    n: m.n, shape: m.shape, point: m.point, normal: m.normal, size_mm: m.size_mm,
+    dims: Object.fromEntries(Object.entries(m.dims || {}).map(([k, v]) => [k, +v.toFixed(2)])),
+  }))});
+}
+
+function restoreMarks(saved) {   // after an iframe reload (Python already has them, so no publish)
+  marks = saved.map(m => ({...m, local: new THREE.Vector3(...m.point).sub(cadCenter)}));
+}
+
+// debug/inspection hook (handy for automated UI tests)
+window.__viewer = {camera, controls, renderer, scene, get marks() { return marks; }, get dist() { return camera.position.distanceTo(controls.target); }};
+
+/* ---------------- render loop + Streamlit render events ---------------- */
+(function loop() {
+  requestAnimationFrame(loop);
+  applyZoom();
+  controls.update();
+  renderer.render(scene, camera);
+  drawMarks();
+})();
+
+window.addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || d.type !== "streamlit:render") return;
+  const a = d.args || {};
+  $("dims").textContent = a.dims || "";
+  if (a.model_id !== modelId) {
+    modelId = a.model_id; resize(); loadModel(a.stl_b64);
+    restoreMarks(a.marks || []);
+  }
+});
+resize();
+</script>
+</body>
+</html>

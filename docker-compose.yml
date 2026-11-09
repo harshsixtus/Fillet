@@ -1,0 +1,12 @@
+# Run Fillet locally in Docker:  docker compose up --build   ->  http://localhost:7860
+services:
+  fillet:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file: .env              # your API keys (read at runtime, never baked into the image)
+    environment:
+      T2C_SERVER_MODE: "1"      # a container cannot open apps on your desktop, so hide those buttons
+      MAX_BUILDS_PER_HOUR: "0"  # no limit for your own machine
+    volumes:
+      - ./library:/home/user/app/library   # keep saved models between runs

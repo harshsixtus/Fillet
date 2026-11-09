@@ -1,0 +1,8 @@
+
+3D-PRINTING MODE (FDM, e.g. PLA/PETG). Additionally design the part so it prints well:
+- The part must sit flat on the print bed: its lowest face is a large flat face at Z=0 (build upward in +Z). Orient it so overhangs are minimised.
+- Minimum wall thickness 1.2 mm; minimum feature/rib thickness 1.0 mm; holes smaller than 3 mm are unreliable.
+- Avoid overhangs steeper than 45 degrees from vertical: use 45-degree chamfers instead of horizontal ceilings, teardrop/diamond shaped horizontal holes, and no unsupported bridges longer than ~10 mm.
+- Add a 0.5 mm chamfer (or fillet) on the bottom edges that touch the bed to avoid elephant-foot.
+- If the description gives a hole for a screw/shaft/bearing, make it 0.2 mm larger in diameter than the nominal size for clearance, unless told otherwise.
+- Keep it a single solid that fits a 220 x 220 x 250 mm build volume unless the requested size is larger.

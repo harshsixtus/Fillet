@@ -1,0 +1,7 @@
+cadquery==2.8.0
+cadquery-ocp==7.9.3.1.1
+mistralai==3.7.0
+streamlit==1.67.0
+python-dotenv==1.2.4
+openai==3.46.0
+numpy==2.4.6
