@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Iterator
 
 from llm import CodeGenerator
-from sandbox import SandboxResult, run_code
+from sandbox import SandboxResult, prewarm, run_code
+from verify import geometry_proven
 
 MAX_REPAIRS = 3   # total extra LLM rounds after the first generation
 
@@ -38,6 +39,7 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
     work_dir = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="text2cad_"))
     gen = generator or CodeGenerator()
 
+    prewarm()   # CadQuery imports in the background while the LLM writes the code
     # First message builds from scratch; a follow-up (current_code given) edits the existing model.
     code = gen.revise(prompt, current_code, marks) if current_code else gen.generate(prompt)
     best: Attempt | None = None   # best valid model so far: fewest separate pieces, then the latest
@@ -57,7 +59,9 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
             )
             continue
         if res.ok:
-            fixed = gen.check(res.metrics) if (self_check and not last) else None
+            # Skip the (slow) LLM self-check when the measurements provably match what the user asked for.
+            proven = geometry_proven(getattr(gen, "requests", []), res.metrics)
+            fixed = gen.check(res.metrics) if (self_check and not last and not proven) else None
             if fixed is None:
                 yield Attempt(i, code, res, accepted=True, best_effort=res.metrics.get("num_solids", 1) > 1)
                 return

@@ -133,8 +133,9 @@ def write_3mf(shape: cq.Shape, path: Path, tolerance: float = 0.05) -> None:
         z.writestr("3D/3dmodel.model", model)
 
 
-def export_files(shape: cq.Shape, out_dir: Path, stem: str = "model",
-                 print_mode: bool = False) -> tuple[Path, Path]:
+def export_preview(shape: cq.Shape, out_dir: Path, stem: str = "model",
+                   print_mode: bool = False) -> tuple[cq.Shape, Path, Path]:
+    """The fast part, needed right away: STEP (CAD) + STL (3D viewer). Returns the (bed-placed) shape."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if print_mode:  # drop the part onto the print bed (lowest point at Z=0)
         shape = shape.moved(cq.Location(cq.Vector(0, 0, -shape.BoundingBox().zmin)))
@@ -142,11 +143,22 @@ def export_files(shape: cq.Shape, out_dir: Path, stem: str = "model",
     stl = out_dir / f"{stem}.stl"
     cq.exporters.export(shape, str(step))
     cq.exporters.export(shape, str(stl), tolerance=0.05, angularTolerance=0.1)
+    return shape, step, stl
+
+
+def export_rest(shape: cq.Shape, out_dir: Path, stem: str = "model") -> None:
+    """The slower extras (3MF, BREP, dimensioned drawings). Best effort: never fails the build."""
     try:
         write_3mf(shape, out_dir / f"{stem}.3mf")
-    except Exception:  # noqa: BLE001 - best effort
+    except Exception:  # noqa: BLE001
         pass
-    _export_extras(shape, out_dir, stem)   # best effort: never fails the build
+    _export_extras(shape, out_dir, stem)
+
+
+def export_files(shape: cq.Shape, out_dir: Path, stem: str = "model",
+                 print_mode: bool = False) -> tuple[Path, Path]:
+    shape, step, stl = export_preview(shape, out_dir, stem, print_mode)
+    export_rest(shape, out_dir, stem)
     return step, stl
 
 

@@ -105,15 +105,22 @@ def _save_cooldown(key: str, seconds: float) -> None:
         pass
 
 
-def _retry_after_seconds(message: str, default: float = 3600) -> float:
-    """Parse 'try again in 3m43.3s' / '1h2m' style hints; fall back to `default`."""
-    m = re.search(r"try again in\s+((?:\d+(?:\.\d+)?\s*[hms]\s*)+)", message, re.IGNORECASE)
+def _short_wait_hint(message: str) -> float | None:
+    """Seconds from a per-minute rate-limit hint like 'try again in 1.83s' / '450ms' / '1m2.5s', or None."""
+    m = re.search(r"try again in\s+([\d.hms\s]+)", message, re.IGNORECASE)
     if not m:
-        return default
-    total = 0.0
-    for num, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", m.group(1)):
-        total += float(num) * {"h": 3600, "m": 60, "s": 1}[unit]
-    return total + 5
+        return None
+    total, found = 0.0, False
+    for num, unit in re.findall(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", m.group(1)):
+        total += float(num) * {"ms": 0.001, "h": 3600, "m": 60, "s": 1}[unit]
+        found = True
+    return total if found else None
+
+
+def _retry_after_seconds(message: str, default: float = 3600) -> float:
+    """Parse 'try again in 3m43.3s' / '1h2m' / '450ms' style hints (+5 s margin); fall back to `default`."""
+    hint = _short_wait_hint(message)
+    return default if hint is None else hint + 5
 
 
 def classify(exc: Exception) -> tuple[str, float]:
@@ -199,6 +206,7 @@ class CodeGenerator:
         self.used: list[str] = []          # labels of models that actually answered
         self.events: list[str] = []        # human-readable switch notices
         self.last_brief: str = ""           # design brief written before the latest code
+        self.requests: list[str] = []      # the user's own words (first prompt + chat edits), for verification
         self._clients: dict[str, object] = {}
         system = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
         if print_mode:
@@ -280,7 +288,9 @@ class CodeGenerator:
                     action, cool = classify(e)
                     last = f"{type(e).__name__}: {str(e)[:160]}"
                     if action == "retry" and attempt < short_retries:
-                        time.sleep(min(2 ** (attempt + 1), 20))
+                        # wait exactly as long as the provider asks ("try again in 1.8s"), not a blind backoff
+                        hinted = _short_wait_hint(str(e))
+                        time.sleep(min(hinted + 0.3, 20) if hinted is not None else min(2 ** (attempt + 1), 20))
                         continue
                     if action == "next" and not small:
                         small = True          # same model, smaller request (shorter history, fewer output tokens)
@@ -327,12 +337,24 @@ class CodeGenerator:
     )
 
     def _brief_then_code(self, request: str, brief_prompt: str, code_prompt: str) -> str:
-        self.messages.append({"role": "user", "content": f"{request}\n\n{brief_prompt}"})
-        self.last_brief = self._complete_text()
-        self.messages.append({"role": "user", "content": code_prompt})
+        """Brief and code in ONE reply (one round trip instead of two): the brief as plain text, then the full
+        script in a ```python block. Falls back to a second request if the reply has no usable code."""
+        self.messages.append({"role": "user", "content": (
+            f"{request}\n\n{brief_prompt}\n\nThen, directly below the brief, {code_prompt[0].lower()}{code_prompt[1:]} "
+            "Put the script in a single ```python code block.")})
+        reply = self._complete_text()
+        fence = reply.find("```")
+        self.last_brief = (reply[:fence] if fence >= 0 else "").strip()
+        code = extract_code(reply) if fence >= 0 else ""
+        if "result" in code and "\n" in code.strip():
+            return code
+        if not self.last_brief:
+            self.last_brief = reply.strip()
+        self.messages.append({"role": "user", "content": code_prompt})   # fallback: ask for the code alone
         return self._complete()
 
     def generate(self, user_prompt: str) -> str:
+        self.requests.append(user_prompt)
         return self._brief_then_code(
             user_prompt, self.BRIEF,
             "Now write the complete CadQuery script that implements this brief faithfully. "
@@ -341,6 +363,7 @@ class CodeGenerator:
 
     def revise(self, request: str, current_code: str, marks: str = "") -> str:
         """Chat follow-up: modify the current model."""
+        self.requests.append(request)
         content = (
             "Modify the current model according to this request:\n"
             f"{request}\n\n"

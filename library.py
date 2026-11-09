@@ -27,6 +27,11 @@ def save(final: dict, name: str, chat: list[dict], llm_messages: list[dict], mod
     dest = LIB / model_id
     dest.mkdir(parents=True, exist_ok=True)
     src = Path(final["out_dir"])
+    try:
+        import sandbox
+        sandbox.wait_exports(src)   # drawings / 3MF may still be finishing in the background
+    except Exception:  # noqa: BLE001
+        pass
     (src / "model.py").write_text(final["code"], encoding="utf-8")
     for f in FILES:
         if (src / f).exists():

@@ -23,6 +23,7 @@ import library
 import about
 import config
 import llm
+import sandbox
 import ui_art
 import print_check
 import share
@@ -654,6 +655,9 @@ with right:
                 marks = cad_viewer(Path(f["stl_path"]), model_id=f"{ss.viewer_nonce}:{f['out_dir']}",
                                    dims=f"{x:g} × {y:g} × {z:g} mm", key=f"viewer_{ss.viewer_nonce}")
             with tab2d:
+                if not (Path(f["out_dir"]) / "exports.done").exists():
+                    with st.spinner("Finishing the drawings…"):
+                        sandbox.wait_exports(Path(f["out_dir"]))
                 drawing_preview(Path(f["out_dir"]))
             show_metrics(f["metrics"])
             if f["metrics"].get("num_solids", 1) > 1:
