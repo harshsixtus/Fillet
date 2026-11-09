@@ -11,7 +11,7 @@ from typing import Iterable, Sequence
 
 import cadquery as cq
 
-__all__ = ["box", "cylinder", "sphere", "loft_x", "loft_z", "revolve_z", "pins", "pin_grid", "union", "cut",
+__all__ = ["box", "cylinder", "sphere", "loft_x", "loft_z", "revolve_z", "pins", "pin_grid", "union", "cut", "repair",
            "fillet", "chamfer", "shell", "holes_z", "bend_up"]
 
 
@@ -85,11 +85,29 @@ def revolve_z(profile: Sequence[Sequence[float]]) -> cq.Workplane:
 
 
 # ----------------------------------------------------------------------------- repeated features
+def _on_surface(body, pts, base_z: float, embed: float) -> list:
+    """Keep only the (x, y) points whose pin foot actually sits inside `body` (so no pin floats in the air)."""
+    solid = _wp(body).val()
+    z = base_z - max(min(embed, 0.4), 0.05) / 2
+    keep = []
+    for x, y in pts:
+        try:
+            if solid.isInside(cq.Vector(x, y, z), 1e-3):
+                keep.append((x, y))
+        except Exception:  # noqa: BLE001
+            keep.append((x, y))
+    return keep
+
+
 def pins(points: Iterable[Sequence[float]], d: float, h: float, base_z: float, embed: float = 0.4,
-         kind: str = "circle", size2: float | None = None) -> cq.Workplane:
+         kind: str = "circle", size2: float | None = None, on=None) -> cq.Workplane:
     """Many small pins/tufts/ribs standing up from z = base_z at (x, y) points. They are sunk `embed` mm into the
-    surface below so they always fuse with it. kind 'circle' (d = diameter) or 'rect' (d x size2)."""
+    surface below so they always fuse with it. kind 'circle' (d = diameter) or 'rect' (d x size2).
+    on=<body>: keep only the pins whose foot really lands on that body (e.g. tufts that fall off a toothbrush
+    head are dropped instead of floating)."""
     pts = [tuple(p[:2]) for p in points]
+    if on is not None:
+        pts = _on_surface(on, pts, base_z, embed) or pts
     wp = cq.Workplane("XY", origin=(0, 0, base_z - embed)).pushPoints(pts)
     wp = wp.circle(d / 2) if kind == "circle" else wp.rect(d, size2 or d)
     return wp.extrude(h + embed)
@@ -97,7 +115,8 @@ def pins(points: Iterable[Sequence[float]], d: float, h: float, base_z: float, e
 
 def pin_grid(center, nx: int, ny: int, pitch_x: float, pitch_y: float, d: float, h: float, base_z: float,
              **kw) -> cq.Workplane:
-    """Rectangular grid of pins/tufts (e.g. toothbrush bristles, studs) centred on center=(x, y)."""
+    """Rectangular grid of pins/tufts (e.g. toothbrush bristles, studs) centred on center=(x, y).
+    Pass on=<body> to keep only the pins that land on that body."""
     cx, cy = center[0], center[1]
     pts = [(cx + (i - (nx - 1) / 2) * pitch_x, cy + (j - (ny - 1) / 2) * pitch_y) for i in range(nx) for j in range(ny)]
     return pins(pts, d, h, base_z, **kw)
@@ -112,8 +131,32 @@ def holes_z(body: cq.Workplane, points: Iterable[Sequence[float]], d: float) -> 
 
 
 # ----------------------------------------------------------------------------- booleans (robust)
-def union(*parts, tol: float = 0.05) -> cq.Workplane:
-    """Fuse everything into one solid. Uses a small fuzzy tolerance so parts that just touch still join."""
+def repair(shape):
+    """OpenCascade's shape healing: makes most 'not valid' boolean results valid again."""
+    try:
+        if not shape.isValid():
+            fixed = shape.fix()
+            if fixed.isValid():
+                return fixed
+    except Exception:  # noqa: BLE001
+        pass
+    return shape
+
+
+def _drop_floaters(shape, min_fraction: float):
+    """Remove tiny loose fragments (< min_fraction of the biggest piece's volume): stray pins, slivers."""
+    solids = shape.Solids()
+    if len(solids) <= 1:
+        return shape
+    vols = [s.Volume() for s in solids]
+    big = max(vols)
+    keep = [s for s, v in zip(solids, vols) if v >= min_fraction * big]
+    return keep[0] if len(keep) == 1 else cq.Compound.makeCompound(keep)
+
+
+def union(*parts, tol: float = 0.05, drop_floaters: float = 0.05) -> cq.Workplane:
+    """Fuse everything into one solid. Uses a small fuzzy tolerance so parts that just touch still join, heals
+    invalid results, and drops tiny loose fragments (< drop_floaters x the main body's volume; 0 keeps them)."""
     shapes = [_wp(p).val() for p in parts if p is not None]
     if not shapes:
         raise ValueError("union() needs at least one part")
@@ -125,7 +168,10 @@ def union(*parts, tol: float = 0.05) -> cq.Workplane:
             wp = _wp(shapes[0])
             for s in shapes[1:]:
                 wp = wp.union(_wp(s))
-            return wp.clean()
+            out = wp.clean().val()
+    out = repair(out)
+    if drop_floaters:
+        out = repair(_drop_floaters(out, drop_floaters))
     return _wp(out)
 
 

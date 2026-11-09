@@ -45,6 +45,13 @@ def to_shape(result: Any) -> cq.Shape:
     shape = solids[0] if len(solids) == 1 else cq.Compound.makeCompound(solids)
 
     if not shape.isValid():
+        try:   # OpenCascade shape healing fixes most invalid boolean results
+            fixed = shape.fix()
+            if fixed.isValid():
+                shape = fixed
+        except Exception:  # noqa: BLE001
+            pass
+    if not shape.isValid():
         raise InvalidResult("The resulting solid is not valid (OCC isValid() is False)")
     if shape.Volume() <= 1e-6:
         raise InvalidResult("The resulting solid has zero or negative volume")
@@ -142,6 +149,15 @@ def export_preview(shape: cq.Shape, out_dir: Path, stem: str = "model",
     step = out_dir / f"{stem}.step"
     stl = out_dir / f"{stem}.stl"
     cq.exporters.export(shape, str(step))
+    # Coarse copy for the design-review renderer (a 320 px image needs far fewer triangles). It must be
+    # meshed FIRST: OpenCascade caches a shape's mesh, and a finer request later re-meshes, a coarser one doesn't.
+    try:
+        bb = shape.BoundingBox()
+        coarse = max(bb.xlen, bb.ylen, bb.zlen) / 400
+        cq.exporters.export(shape, str(out_dir / f"{stem}_render.stl"), tolerance=max(coarse, 0.1),
+                            angularTolerance=0.35)
+    except Exception:  # noqa: BLE001
+        pass
     cq.exporters.export(shape, str(stl), tolerance=0.05, angularTolerance=0.1)
     return shape, step, stl
 

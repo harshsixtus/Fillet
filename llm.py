@@ -453,6 +453,89 @@ class CodeGenerator:
         })
         return self._complete()
 
+    # ---------------------------------------------------------------- visual design review
+    VISION_BACKENDS = (("groq", "qwen/qwen3.8-27b"), ("mistral", "mistral-small-latest"))
+
+    def review(self, png: bytes, metrics: dict) -> tuple[str, str]:
+        """Show a vision model three rendered views of the part and ask for a designer's verdict.
+
+        Returns ("ok", "") if it looks right, ("fix", "<concrete changes>") if not, or ("unavailable", reason)
+        when no vision-capable model can be reached (the caller then falls back to the text self-check).
+        This call is stateless: the image is not added to the conversation history."""
+        import base64
+
+        uri = "data:image/png;base64," + base64.b64encode(png).decode()
+        x, y, z = metrics["bbox_mm"]
+        request = " / then: ".join(self.requests) or "(see conversation)"
+        prompt = (
+            "You are a senior product designer reviewing a 3D CAD model that was generated from this request:\n"
+            f"\"{request}\"\n\n"
+            "The image shows three views of the model: isometric (left), front (middle: X right, Z up) and "
+            "top (right: X right, Y up). Measured overall size: "
+            f"X={x:g} mm, Y={y:g} mm, Z={z:g} mm; round holes found: {_features(metrics.get('holes'))}; "
+            f"separate solids: {metrics.get('num_solids', 1)}.\n\n"
+            "Judge only the geometry: does it look like a realistic, well-proportioned version of what was asked "
+            "for, with every feature a person would expect to recognise (and every dimension the request states)? "
+            "Ignore colour, shading, render quality and missing textures or materials.\n"
+            "If it is good, reply with exactly: OK\n"
+            "Otherwise reply with 'FIX:' followed by up to 5 short, concrete geometric changes with dimensions in mm "
+            "(for example: 'make the head 28 mm long and 12 mm wide', 'cover the whole head with a 4 x 10 grid of "
+            "1.8 mm tufts, 11 mm tall'). No code, no explanations."
+        )
+        cooldowns = _load_cooldowns()
+        reasons = []
+        for prov, model in self.VISION_BACKENDS:
+            b = Backend(prov, model)
+            if not os.environ.get(KEY_ENV[prov]) or b.key in cooldowns:
+                continue
+            client = self._client(b)
+            if prov == "groq":
+                content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": uri}}]
+                call = lambda: client.chat.completions.create(  # noqa: E731
+                    model=model, messages=[{"role": "user", "content": content}], temperature=0.2, max_tokens=1200)
+            else:
+                content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": uri}]
+                call = lambda: client.chat.complete(  # noqa: E731
+                    model=model, messages=[{"role": "user", "content": content}], temperature=0.2, max_tokens=1200)
+            for attempt in range(3):
+                try:
+                    resp = _run_interruptibly(call, self.tick) if getattr(self, "tick", None) else call()
+                    text = resp.choices[0].message.content
+                    if isinstance(text, list):
+                        text = "".join(getattr(c, "text", "") for c in text)
+                    text = _THINK.sub("", text or "").strip()
+                    self.events.append(f"design review by {b.label}")
+                    head = text.strip().strip("`*").upper()
+                    if head.startswith("OK") and len(text) < 40:
+                        return "ok", ""
+                    fixes = text.split(":", 1)[1].strip() if text.upper().startswith("FIX") else text
+                    return ("fix", fixes[:1500]) if fixes else ("ok", "")
+                except Exception as e:  # noqa: BLE001
+                    action, cool = classify(e)
+                    if action == "retry" and attempt < 2:
+                        hinted = _short_wait_hint(str(e))
+                        time.sleep(min(hinted + 0.3, 20) if hinted is not None else 2 ** (attempt + 1))
+                        continue
+                    if action == "skip":
+                        _save_cooldown(b.key, cool)
+                    reasons.append(f"{b.label}: {type(e).__name__}: {str(e)[:120]}")
+                    break
+        return "unavailable", "; ".join(reasons) or "no vision model configured"
+
+    def revise_from_review(self, fixes: str) -> str:
+        """Apply a design reviewer's requested changes to the current script."""
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "A senior product designer looked at renders of your model and asked for these changes:\n"
+                f"{fixes}\n\n"
+                "Apply them, keep every dimension the user specified and everything that was not criticised. "
+                "Prefer the robust helpers (`import t2c as h`). Return the complete corrected CadQuery script only, "
+                "assigning the final solid to `result`."
+            ),
+        })
+        return self._complete()
+
     def check(self, metrics: dict) -> str | None:
         """Self-check: show the model the measured geometry. Returns None if it
         says the part matches the request, otherwise the revised code."""

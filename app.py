@@ -461,7 +461,8 @@ def _run_build_locked(text: str, marks_text: str, f: dict | None, gen, print_mod
                     log.append(f"attempt {n}: accepted")
                 elif att.ok:
                     log.append(f"attempt {n}: built {att.result.metrics['bbox_mm']} but needs revision ({att.note})")
-                    status.update(label="Checking dimensions and refining the design…")
+                    status.update(label="Reviewing the design and refining it…" if att.note.startswith("Design review")
+                                  else "Checking dimensions and refining the design…")
                 else:
                     log.append(f"attempt {n}: {(att.result.error.strip().splitlines() or ['error'])[-1][:300]}")
                     status.update(label="Fixing a problem and trying again…")

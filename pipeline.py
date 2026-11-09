@@ -11,6 +11,7 @@ from sandbox import SandboxResult, prewarm, run_code
 from verify import geometry_proven
 
 MAX_REPAIRS = 3   # total extra LLM rounds after the first generation
+MAX_REVIEWS = 2   # visual design-review rounds per build (each may trigger one revision)
 
 
 @dataclass
@@ -25,6 +26,16 @@ class Attempt:
     @property
     def ok(self) -> bool:
         return self.result.ok
+
+
+def _render(res: SandboxResult) -> bytes | None:
+    """Three-view PNG of a built part for the design review (coarse mesh when available). None on failure."""
+    try:
+        from render import render_views_png
+        coarse = res.stl_path.with_name(res.stl_path.stem + "_render.stl")
+        return render_views_png(coarse if coarse.exists() else res.stl_path)
+    except Exception:  # noqa: BLE001 - the review is optional
+        return None
 
 
 def run_pipeline(prompt: str, work_dir: Path | None = None,
@@ -43,6 +54,7 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
     # First message builds from scratch; a follow-up (current_code given) edits the existing model.
     code = gen.revise(prompt, current_code, marks) if current_code else gen.generate(prompt)
     best: Attempt | None = None   # best valid model so far: fewest separate pieces, then the latest
+    reviews = 0
     for i in range(max_repairs + 1):
         res = run_code(code, work_dir / f"attempt_{i}", print_mode=print_mode, tick=tick)
         last = i == max_repairs
@@ -61,7 +73,22 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
         if res.ok:
             # Skip the (slow) LLM self-check when the measurements provably match what the user asked for.
             proven = geometry_proven(getattr(gen, "requests", []), res.metrics)
-            fixed = gen.check(res.metrics) if (self_check and not last and not proven) else None
+            fixed = None
+            if self_check and not last and not proven:
+                # Visual design review: a vision model looks at rendered views of the part (shape, proportions,
+                # recognisable features). Falls back to the text-only self-check if no vision model is reachable.
+                verdict, fixes = ("unavailable", "")
+                if reviews < MAX_REVIEWS and hasattr(gen, "review"):
+                    png = _render(res)
+                    if png:
+                        verdict, fixes = gen.review(png, res.metrics)
+                if verdict == "fix":
+                    reviews += 1
+                    yield Attempt(i, code, res, note=f"Design review: {fixes}")
+                    code = gen.revise_from_review(fixes)
+                    continue
+                if verdict == "unavailable":
+                    fixed = gen.check(res.metrics)
             if fixed is None:
                 yield Attempt(i, code, res, accepted=True, best_effort=res.metrics.get("num_solids", 1) > 1)
                 return

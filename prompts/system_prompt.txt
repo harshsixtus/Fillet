@@ -43,17 +43,21 @@ always return a cq.Workplane with one solid, and never crash on cosmetic steps. 
       # smooth organic body along X through cross-sections: handles, necks, blades, bodies lying down
 - h.loft_z([(z, width_x, depth_y), ...], kind=...)          # smooth body going up: bottles, cups, feet
 - h.revolve_z([(radius, z), ...])                            # turned parts: knobs, bottles, wheels, spools
-- h.pin_grid(center=(x, y), nx, ny, pitch_x, pitch_y, d, h, base_z)   # grid of pins/tufts/studs fused onto a surface at base_z
-- h.pins([(x, y), ...], d, h, base_z)                        # pins at arbitrary points
+- h.pin_grid(center=(x, y), nx, ny, pitch_x, pitch_y, d, h, base_z, on=body)   # grid of pins/tufts/studs standing on a surface at base_z;
+      # on=body keeps only pins that really land on that body (no floating pins). Make the grid cover the surface.
+- h.pins([(x, y), ...], d, h, base_z, on=body)               # pins at arbitrary points
 - h.holes_z(body, [(x, y), ...], d)                          # vertical through-holes
-- h.union(a, b, c, ...)   h.cut(body, tool, ...)             # robust booleans (touching parts still fuse)
+- h.union(a, b, c, ...)   h.cut(body, tool, ...)             # robust booleans: touching parts fuse, invalid results are
+      # healed, tiny loose fragments are dropped. h.repair(shape) heals a shape explicitly.
 - h.fillet(body, r, selector=None)   h.chamfer(body, d, selector=None)   # safe: skips edges it cannot round
 - h.shell(body, thickness, open_face=">Z")                   # hollow it out (cups, enclosures, bottles)
 - h.bend_up(body, angle_deg, pivot_x)                        # tilt a part up around Y at x = pivot_x
 Pattern: build each recognisable feature as its own solid with these helpers, then result = h.union(...),
 then optional h.fillet / h.cut. Example - a realistic toothbrush:
     import t2c as h
-    handle = h.loft_x([(0, 12, 9), (40, 16, 12), (110, 15, 11), (135, 8, 6)])
-    head = h.loft_x([(135, 8, 6), (150, 7, 5), (152, 12, 5), (180, 13, 5), (184, 9, 5)], kind="rounded")
-    bristles = h.pin_grid(center=(167, 0), nx=7, ny=3, pitch_x=4, pitch_y=3.6, d=1.8, h=11, base_z=5)
-    result = h.union(handle, head, bristles)
+    handle = h.loft_x([(0, 13, 10), (45, 17, 13), (105, 14, 11), (140, 7, 6)])          # grip, then tapering
+    neck_head = h.loft_x([(140, 7, 6), (152, 6.5, 5), (156, 12, 5), (178, 13, 5), (186, 9, 5)], kind="rounded")
+    bristles = h.pin_grid(center=(170, 0), nx=9, ny=4, pitch_x=3.3, pitch_y=2.8, d=1.8, h=11, base_z=5, on=neck_head)
+    result = h.union(handle, neck_head, bristles)
+  Proportions matter as much as features: the bristle field should cover most of the head, the head should be
+  clearly wider than the neck, and the handle should taper smoothly into the neck.
