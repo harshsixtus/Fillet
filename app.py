@@ -312,7 +312,7 @@ def maker_footer() -> str:
     link_html = "".join(f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{label}<span>&#8599;</span></a>'
                         for label, url in links)
     mail = f'<div class="maker-mail">{html.escape(about.EMAIL)}</div>' if about.EMAIL else ""
-    return (f'<div class="maker"><div><div class="maker-k">About the maker</div>'
+    return (f'<div class="maker"><div><div class="maker-k">About the developer</div>'
             f'<div class="maker-n">{html.escape(about.AUTHOR)}</div><div class="maker-r">{html.escape(about.ROLE)}</div>'
             f'<p>{html.escape(about.ABOUT)}</p></div>'
             f'<div class="maker-side"><div class="maker-links">{link_html}</div>{mail}</div></div>'

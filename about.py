@@ -4,7 +4,7 @@ APP_NAME = "Fillet"
 TAGLINE = "Describe it. We'll draft it."
 
 AUTHOR = "Harsh Mudgal"
-ROLE = "AI Intern at iDream Education · B.Tech CSE, MDU UIET Rohtak (2027)"
+ROLE = "Developer of Fillet · B.Tech CSE, MDU UIET Rohtak (2027)"
 ABOUT = (
     "I build machine-learning, computer-vision and LLM systems. Fillet is my experiment in turning plain "
     "language into real, measurable CAD: an LLM plans the part, writes CadQuery, checks its own geometry "
