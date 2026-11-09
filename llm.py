@@ -215,6 +215,29 @@ def extract_code(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # Generator
 # --------------------------------------------------------------------------- #
+def _run_interruptibly(fn, tick, interval: float = 0.25):
+    """Run a blocking call in a daemon thread and call `tick()` while it is in flight. If `tick` raises
+    (e.g. the user pressed Stop), the exception propagates at once and the late result is simply discarded."""
+    import threading
+
+    box: dict = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # noqa: BLE001 - re-raised in the caller's thread
+            box["error"] = e
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    while th.is_alive():
+        tick()
+        th.join(interval)
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 class CodeGenerator:
     """Holds one conversation so repair requests see the full history. The history is
     provider-agnostic, so the model can be switched mid-conversation."""
@@ -232,6 +255,9 @@ class CodeGenerator:
         self.events: list[str] = []        # human-readable switch notices
         self.last_brief: str = ""           # design brief written before the latest code
         self.requests: list[str] = []      # the user's own words (first prompt + chat edits), for verification
+        # Called several times a second while waiting for the model; the UI uses it as a heartbeat so a
+        # 'Stop' click can interrupt a slow call immediately. None = just wait.
+        self.tick = None
         self._clients: dict[str, object] = {}
         system = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
         if print_mode:
@@ -287,8 +313,14 @@ class CodeGenerator:
         if b.provider == "groq":
             if "gpt-oss" in b.model:
                 kwargs["reasoning_effort"] = "low" if small else os.environ.get("LLM_REASONING", "medium")
-            return client.chat.completions.create(model=b.model, messages=messages, temperature=0.2, **kwargs)
-        return client.chat.complete(model=b.model, messages=messages, temperature=0.2, **kwargs)
+            request = lambda: client.chat.completions.create(  # noqa: E731
+                model=b.model, messages=messages, temperature=0.2, **kwargs)
+        else:
+            request = lambda: client.chat.complete(model=b.model, messages=messages, temperature=0.2, **kwargs)  # noqa: E731
+        tick = getattr(self, "tick", None)
+        if tick is None:
+            return request()
+        return _run_interruptibly(request, tick)
 
     def _chat_with_failover(self, short_retries: int = 3):
         """Try each model in the chain; short (per-minute) rate limits are retried with backoff,

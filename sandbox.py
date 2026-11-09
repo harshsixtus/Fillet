@@ -116,7 +116,9 @@ def _shutdown() -> None:
         _kill(w)
 
 
-def run_code(code: str, out_dir: Path, timeout: int = TIMEOUT_S, print_mode: bool = False) -> SandboxResult:
+def run_code(code: str, out_dir: Path, timeout: int = TIMEOUT_S, print_mode: bool = False,
+             tick=None) -> SandboxResult:
+    """tick: optional callable invoked while waiting (UI heartbeat). If it raises, the worker is killed."""
     global _spare
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +139,15 @@ def run_code(code: str, out_dir: Path, timeout: int = TIMEOUT_S, print_mode: boo
         pass
 
     t0, t_job = time.time(), None
+    try:
+        return _wait_for_result(w, result_file, started, t0, timeout, tick)
+    except BaseException:
+        _kill(w)          # stopped by the user (or any error while waiting): nothing keeps running
+        raise
+
+
+def _wait_for_result(w: "_Worker", result_file: Path, started: Path, t0: float, timeout: int, tick) -> SandboxResult:
+    t_job = None
     while True:
         if result_file.exists():
             break
@@ -151,6 +162,8 @@ def run_code(code: str, out_dir: Path, timeout: int = TIMEOUT_S, print_mode: boo
             prewarm()
             return SandboxResult(False, f"TimeoutError: code did not finish within {timeout} s "
                                         "(simplify the geometry / avoid heavy booleans or huge loops)")
+        if tick is not None:
+            tick()
         time.sleep(0.03)
 
     if result_file.exists():

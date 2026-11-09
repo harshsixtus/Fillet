@@ -148,5 +148,15 @@ div[data-testid="stButton"] button[kind="primary"] p::after {content: "  \\2192"
 .foot {margin-top: 18px;}
 @media (max-width: 760px) {.maker {grid-template-columns: 1fr;} .maker-side {align-items: flex-start;}
   .maker-links {justify-content: flex-start;}}
+/* ---------- header: wordmark as a home link, Home / Stop button ---------- */
+.st-key-brand_home button {background: transparent !important; border: none !important; box-shadow: none !important;
+  padding: 0 !important; min-height: 0; transform: none !important;}
+.st-key-brand_home button p {font-size: 1.3rem !important; font-weight: 600; letter-spacing: -.02em; color: var(--ink);}
+.st-key-brand_home button:hover p {color: var(--accent);}
+.st-key-home_btn button {font-family: var(--mono) !important; text-transform: uppercase; letter-spacing: .1em;}
+.st-key-home_btn button p {font-family: var(--mono) !important; font-size: .72rem !important;}
+.st-key-home_btn button p::before {content: "\\2190  "; color: var(--accent);}
+.st-key-home_btn button:hover {border-color: var(--accent) !important;}
+.st-key-home_btn button:hover p {color: var(--accent);}
 </style>
 """

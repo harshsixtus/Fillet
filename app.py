@@ -438,9 +438,21 @@ def _run_build_locked(text: str, marks_text: str, f: dict | None, gen, print_mod
     final, n = None, 0
     busy = False
     with st.status("Designing your part…" if not f else "Applying your change…", expanded=False) as status:
+        # Streamlit can only stop a run when the page updates. This invisible heartbeat updates it 4x a second
+        # while we wait on the AI or the sandbox, so pressing Home stops the build right away.
+        heartbeat = st.empty()
+        last_beat = [0.0]
+
+        def tick() -> None:
+            now = time.time()
+            if now - last_beat[0] >= 0.25:
+                last_beat[0] = now
+                heartbeat.markdown("<span></span>", unsafe_allow_html=True)
+
+        gen.tick = tick
         try:
             for att in run_pipeline(text, work_dir, generator=gen, print_mode=print_mode,
-                                    current_code=f["code"] if f else None, marks=marks_text):
+                                    current_code=f["code"] if f else None, marks=marks_text, tick=tick):
                 n += 1
                 log.extend(gen.events)
                 gen.events.clear()
@@ -456,6 +468,8 @@ def _run_build_locked(text: str, marks_text: str, f: dict | None, gen, print_mod
         except Exception as e:  # noqa: BLE001 - network / quota errors
             busy = True
             log.append(f"{type(e).__name__}: {str(e)[:300]}")
+        finally:
+            gen.tick = None      # never keep a page element referenced in the session's generator
         status.update(label="Done" if final else "Couldn't build it", state="complete" if final else "error",
                       expanded=False)
 
@@ -632,18 +646,32 @@ anim = ss.pop("animate", None)
 # otherwise Streamlit remounts the 3D viewer on the next rerun.
 st.markdown({"enter": TRANSITION_CSS, "model": PREVIEW_IN_CSS}.get(anim, "<style></style>"), unsafe_allow_html=True)
 
-top1, top3 = st.columns([6, 1.1])
+def go_home() -> None:
+    """Back to the landing page. Clicking this while a part is being built stops the build: the heartbeat lets
+    Streamlit interrupt the run, the sandbox worker is killed and the build slot is released."""
+    reset_workspace()
+    ss.lib_open = False
+
+
+building = bool(ss.get("pending"))
+top0, top1, top3 = st.columns([0.8, 5.2, 1.4], vertical_alignment="center")
+with top0:
+    if st.button("Fillet", key="brand_home", help="Home"):
+        go_home()
+        st.rerun()
 with top1:
     pills = ""
     if (f or {}).get("print_mode") or (not f and ss.get("landing_print")):
         pills += '<span class="pill">3D-print mode</span>'
     title = ss.get("lib_name") or (f.get("prompt", "") if f else ss.get("pending", "")) or "new part"
     title = (title[:46] + "…") if len(title) > 47 else title
-    st.markdown(f'<span class="brand">Fillet</span><span class="crumb"><b>/</b>{html.escape(title)}</span>'
+    st.markdown(f'<span class="crumb" style="margin-left:0"><b>/</b>{html.escape(title)}</span>'
                 f'&nbsp;&nbsp;{pills}', unsafe_allow_html=True)
 with top3:
-    if st.button("New model", use_container_width=True):
-        reset_workspace()
+    if st.button("Stop & go home" if building else "Home", key="home_btn", use_container_width=True,
+                 help="Stops the build in progress and returns to the home page" if building
+                 else "Back to the home page to start a new part"):
+        go_home()
         st.rerun()
 
 left, right = st.columns([2, 3], gap="large")

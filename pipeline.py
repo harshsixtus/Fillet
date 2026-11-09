@@ -31,7 +31,7 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
                  generator: CodeGenerator | None = None,
                  max_repairs: int = MAX_REPAIRS, self_check: bool = True,
                  print_mode: bool = False, current_code: str | None = None,
-                 marks: str = "") -> Iterator[Attempt]:
+                 marks: str = "", tick=None) -> Iterator[Attempt]:
     """Yield each attempt as soon as it finishes. A revision is triggered either
     by a sandbox failure (traceback sent back) or by the LLM's own comparison of
     the measured geometry with the request. Stops on acceptance or after
@@ -44,7 +44,7 @@ def run_pipeline(prompt: str, work_dir: Path | None = None,
     code = gen.revise(prompt, current_code, marks) if current_code else gen.generate(prompt)
     best: Attempt | None = None   # best valid model so far: fewest separate pieces, then the latest
     for i in range(max_repairs + 1):
-        res = run_code(code, work_dir / f"attempt_{i}", print_mode=print_mode)
+        res = run_code(code, work_dir / f"attempt_{i}", print_mode=print_mode, tick=tick)
         last = i == max_repairs
         if res.ok and (best is None or res.metrics.get("num_solids", 1) <= best.result.metrics.get("num_solids", 1)):
             best = Attempt(i, code, res)
