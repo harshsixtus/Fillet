@@ -27,7 +27,30 @@ try:  # mistralai >= 2.0
 except ImportError:  # mistralai 1.x
     from mistralai import Mistral
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")   # the project .env, wherever the app is started from
+
+
+def load_streamlit_secrets() -> None:
+    """On Streamlit Community Cloud, keys live in the app's Secrets. Root-level secrets normally appear as
+    environment variables, but only at startup and only at the top level - so copy them over explicitly
+    (also from a [section]), without overriding anything already set. Safe no-op everywhere else."""
+    try:
+        import streamlit as st
+        items = dict(st.secrets)
+    except Exception:  # noqa: BLE001 - no secrets file / not running under Streamlit
+        return
+    flat = {}
+    for k, v in items.items():
+        if isinstance(v, dict) or hasattr(v, "items"):
+            flat.update({kk: vv for kk, vv in dict(v).items() if not isinstance(vv, dict)})
+        else:
+            flat[k] = v
+    for k, v in flat.items():
+        if isinstance(v, (str, int, float, bool)) and str(v).strip() and not os.environ.get(k):
+            os.environ[k] = str(v).strip()
+
+
+load_streamlit_secrets()
 
 ROOT = Path(__file__).parent
 SYSTEM_PROMPT_PATH = ROOT / "prompts" / "system_prompt.txt"
@@ -63,6 +86,7 @@ class Backend:
 
 def build_chain() -> list[Backend]:
     """Ordered list of backends to try. Only providers that have a key are used."""
+    load_streamlit_secrets()   # secrets edited in the cloud dashboard take effect without a reboot
     spec = os.environ.get("LLM_CHAIN", "").strip()
     chain: list[Backend] = []
     if spec:
@@ -199,8 +223,9 @@ class CodeGenerator:
         self.chain = chain if chain is not None else build_chain()
         if not self.chain:
             raise RuntimeError(
-                "No LLM is configured. Put GROQ_API_KEY and/or MISTRAL_API_KEY in .env "
-                "(copy .env.example)."
+                "No AI key found. Locally: put GROQ_API_KEY (and/or MISTRAL_API_KEY) in .env. "
+                "On Streamlit Cloud: Manage app > Settings > Secrets, e.g.  GROQ_API_KEY = \"gsk_...\"  "
+                "(with quotes), then Save."
             )
         self.current: Backend = self.chain[0]
         self.used: list[str] = []          # labels of models that actually answered

@@ -412,7 +412,11 @@ def run_build(text: str, marks_text: str = "") -> bool:
     # A helper kept in the session from before a code update can miss newer methods/fields:
     # rebuild it from the current class and keep its conversation.
     if gen is None or type(gen) is not CodeGenerator or not hasattr(gen, "last_brief"):
-        fresh = CodeGenerator(print_mode=print_mode)
+        try:
+            fresh = CodeGenerator(print_mode=print_mode)
+        except RuntimeError as e:   # no API key configured
+            ss.chat.append({"role": "assistant", "content": f"I can't reach an AI model yet. {e}"})
+            return False
         if gen is not None and getattr(gen, "messages", None):
             fresh.messages = gen.messages
         gen = ss.gen = fresh
