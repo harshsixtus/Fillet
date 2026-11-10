@@ -58,6 +58,9 @@
 import * as THREE from "three";
 import {OrbitControls} from "three/addons/controls/OrbitControls.js";
 import {STLLoader} from "three/addons/loaders/STLLoader.js";
+import {Line2} from "three/addons/lines/Line2.js";
+import {LineMaterial} from "three/addons/lines/LineMaterial.js";
+import {LineGeometry} from "three/addons/lines/LineGeometry.js";
 
 /* ---------------- Streamlit component protocol (no build step needed) ---------------- */
 const send = (type, data = {}) => window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
@@ -83,6 +86,7 @@ controls.enableDamping = true; controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.7; controls.panSpeed = 0.6;
 controls.enableZoom = false;              // replaced by the smooth zoom-to-cursor below
 controls.autoRotate = true; controls.autoRotateSpeed = 1.6;
+controls.addEventListener("change", () => { needsOcc = true; });
 
 const group = new THREE.Group(); group.rotation.x = -Math.PI / 2; scene.add(group);   // CAD Z-up -> three Y-up
 let mesh = null, edges = null, grid = null, axes = null, mat = null;
@@ -96,6 +100,7 @@ function resize() {
   const dpr = window.devicePixelRatio;
   ink.width = W * dpr; ink.height = H * dpr; ink.style.width = W + "px"; ink.style.height = H + "px";
   ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const mt of markMats) mt.resolution.set(W, H);   // thick 3D lines need the viewport size
 }
 window.addEventListener("resize", resize);
 // the iframe can change size without a window resize (layout, tabs, drawer): keep 3D and overlay in sync
@@ -103,13 +108,13 @@ new ResizeObserver(resize).observe(wrap);
 
 function loadModel(b64) {
   if (mesh) { group.remove(mesh); group.remove(edges); scene.remove(grid); group.remove(axes); }
-  marks = [];
+  clearMarks(false);
   const bin = atob(b64); const buf = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
   const geo = new STLLoader().parse(buf.buffer);
   geo.computeBoundingBox(); geo.boundingBox.getCenter(cadCenter);   // remember true CAD coordinates
   geo.computeVertexNormals(); geo.center();
-  mat = new THREE.MeshStandardMaterial({color: 0xA7AFB2, metalness: 0.3, roughness: 0.5});
+  mat = new THREE.MeshStandardMaterial({color: 0xA7AFB2, metalness: 0.3, roughness: 0.5, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1});
   mesh = new THREE.Mesh(geo, mat); group.add(mesh);
   edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 28),
     new THREE.LineBasicMaterial({color: 0x0a0a0a, transparent: true, opacity: .5}));
@@ -161,6 +166,7 @@ function applyZoom() {
   const nd = THREE.MathUtils.clamp(dist * Math.exp(step), minD, maxD);
   const k = nd / dist;
   if (Math.abs(k - 1) < 1e-6) { zoomAcc = 0; return; }
+  needsOcc = true;
   camera.position.sub(zoomPivot).multiplyScalar(k).add(zoomPivot);
   controls.target.sub(zoomPivot).multiplyScalar(k).add(zoomPivot);
 }
@@ -174,8 +180,8 @@ $("reset").onclick = () => { zoomAcc = 0; camera.position.copy(home); controls.t
 $("pen").onclick = () => setPen(!penMode);
 let showDims = true;
 $("dimsbtn").onclick = () => { showDims = !showDims; $("dimsbtn").classList.toggle("on", showDims); };
-$("undo").onclick = () => { if (marks.pop()) publish(); };
-$("clear").onclick = () => { marks = []; publish(); };
+$("undo").onclick = () => { const m = marks.pop(); if (m) { disposeMark(m); publish(); } };
+$("clear").onclick = () => clearMarks(true);
 gl.addEventListener("pointerdown", stopAutoRotate);
 
 function setHint() {
@@ -196,9 +202,15 @@ function toast(msg) {
   clearTimeout(toast._t); toast._t = setTimeout(() => t.style.opacity = 0, 2400);
 }
 
-/* ---------------- marks: anchored on the surface, sized in mm ---------------- */
-// mark = {n, shape, local: Vector3 (mesh frame), normal:[...], dims:{...mm}, point:[cad mm], size_mm}
+/* ---------------- marks: real 3D objects lying on the part's surface ---------------- */
+// mark = {n, shape, center: Vector3, normal: Vector3, dims: {...mm}, size_mm, point: [x,y,z] true CAD mm,
+//         obj: THREE.Group (lines), badge: Sprite, mats: [LineMaterial]}
+// center/normal live in the mesh frame (the centred CAD frame), so a mark rotates, zooms and is hidden by
+// the part exactly like the geometry itself.
 let marks = [];
+const markGroup = new THREE.Group(); group.add(markGroup);
+const markMats = [];
+let needsOcc = true;                    // badge visibility (is it hidden behind the part?) must be recomputed
 
 function pick(x, y) {
   ray.setFromCamera(new THREE.Vector2((x / W) * 2 - 1, -(y / H) * 2 + 1), camera);
@@ -218,47 +230,201 @@ function mmPerPxAt(worldPoint) {
   return 2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / H;
 }
 
-function hitNear(x, y, px) {   // raycast at (x, y); if it misses, search inside a radius
-  let hit = pick(x, y);
-  for (let k = 0; k < 24 && !hit && px > 0; k++) {
-    const a = (k / 24) * Math.PI * 2, rr = px * (k % 2 ? 0.5 : 0.85);
-    hit = pick(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+const _inv = new THREE.Matrix4();
+function rayLocal(x, y) {   // the pointer's ray expressed in the mesh frame
+  ray.setFromCamera(new THREE.Vector2((x / W) * 2 - 1, -(y / H) * 2 + 1), camera);
+  mesh.updateWorldMatrix(true, false);
+  return ray.ray.clone().applyMatrix4(_inv.copy(mesh.matrixWorld).invert());
+}
+
+function planeBasis(n) {    // two axes lying in the plane, aligned with the model's own X / Y / Z
+  const ref = Math.abs(n.z) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+  const u = ref.clone().sub(n.clone().multiplyScalar(ref.dot(n))).normalize();
+  const v = new THREE.Vector3().crossVectors(n, u);
+  return {u, v};
+}
+
+function makeBadge(n) {
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const x = c.getContext("2d");
+  x.fillStyle = "#D27A52"; x.beginPath(); x.arc(32, 32, 28, 0, Math.PI * 2); x.fill();
+  x.lineWidth = 4; x.strokeStyle = "#0E0E0D"; x.stroke();
+  x.fillStyle = "#0E0E0D"; x.font = "bold 34px system-ui"; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText(n, 32, 35);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: new THREE.CanvasTexture(c), depthTest: false, transparent: true}));
+  sp.renderOrder = 10;
+  return sp;
+}
+
+function boxQuad(d, minR) {   // 4 corners in plane coords (relative to the mark's centre)
+  if (d.pts && d.pts.length === 4) return d.pts;
+  const w = Math.max(d.w, 2 * minR) / 2, h = Math.max(d.h, 2 * minR) / 2;
+  return [[-w, -h], [w, -h], [w, h], [-w, h]];
+}
+
+function distToSegment(a, b, p, q, r) {   // distance from (a,b) to segment p-q
+  const dx = q[0] - p[0], dy = q[1] - p[1], L2 = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((a - p[0]) * dx + (b - p[1]) * dy) / L2));
+  return Math.hypot(a - (p[0] + t * dx), b - (p[1] + t * dy));
+}
+
+function disposeMark(m) {
+  if (m.obj) {
+    markGroup.remove(m.obj);
+    m.obj.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.map) o.material.map.dispose(); if (o.material) o.material.dispose(); });
   }
-  return hit;
+  (m.mats || []).forEach((mt) => { const i = markMats.indexOf(mt); if (i >= 0) markMats.splice(i, 1); });
+  m.obj = null; m.mats = [];
 }
 
-function setAnchor(m, hit) {
-  m.local = mesh.worldToLocal(hit.point.clone());
-  m.normal = hit.face.normal.toArray().map(v => +v.toFixed(3));
-  m.point = m.local.clone().add(cadCenter).toArray().map(v => +v.toFixed(2));
+function buildMarkObject(m) {
+  disposeMark(m);
+  const {u, v} = planeBasis(m.normal);
+  const lift = Math.max(r * 0.004, 0.08);                       // float a hair above the surface (no z-fighting)
+  const at = (a, b) => m.center.clone().addScaledVector(u, a).addScaledVector(v, b).addScaledVector(m.normal, lift);
+  const minR = Math.max(r * 0.012, 0.3), d = m.dims || {r: m.size_mm || 3};
+  let pts = [], badgeAt;
+  if (m.shape === "circle" || m.shape === "ellipse") {
+    const rx = Math.max(d.r ?? d.rx, minR), ry = Math.max(d.r ?? d.ry, minR);
+    for (let i = 0; i <= 64; i++) { const a = i / 64 * Math.PI * 2; pts.push(at(Math.cos(a) * rx, Math.sin(a) * ry)); }
+    badgeAt = at(rx * 0.72, ry * 0.72);
+  } else if (m.shape === "box") {
+    const q = boxQuad(d, minR);
+    pts = [...q, q[0]].map(([a, b]) => at(a, b));
+    badgeAt = at(q[2][0], q[2][1]);
+  } else {   // arrow: tail -> head (the head is the mark's centre)
+    const L = Math.hypot(d.dx, d.dy) || 1, t0 = -d.dx / L, t1 = -d.dy / L;
+    const hl = Math.min(Math.max(L * 0.25, r * 0.03), r * 0.12);
+    const bx = -t0 * hl, by = -t1 * hl, px = -t1 * hl * 0.45, py = t0 * hl * 0.45;
+    pts = [at(d.dx, d.dy), at(0, 0), at(bx + px, by + py), at(0, 0), at(bx - px, by - py)];
+    badgeAt = at(d.dx, d.dy);
+  }
+  const geo = new LineGeometry(); geo.setPositions(pts.flatMap((p) => [p.x, p.y, p.z]));
+  const mt = new LineMaterial({color: 0xD27A52, linewidth: 2.8, resolution: new THREE.Vector2(W, H), depthTest: true, transparent: true});
+  markMats.push(mt);
+  const line = new Line2(geo, mt); line.computeLineDistances(); line.renderOrder = 5;
+  const badge = makeBadge(m.n); badge.position.copy(badgeAt);
+  const obj = new THREE.Group(); obj.add(line); obj.add(badge); markGroup.add(obj);
+  m.obj = obj; m.badge = badge; m.mats = [mt];
+  needsOcc = true;
 }
 
-function addMark(s) {
-  // screen point the mark refers to (arrow head, or shape centre) and its size in px
-  const t = s.type === "arrow" ? {x: s.x2, y: s.y2, px: 0}
-          : s.type === "box" ? {x: s.x + s.w / 2, y: s.y + s.h / 2, px: Math.max(s.w, s.h) / 2}
-          : s.type === "circle" ? {x: s.cx, y: s.cy, px: s.r}
-          : {x: s.cx, y: s.cy, px: Math.max(s.rx, s.ry)};
-  const hit = hitNear(t.x, t.y, t.px);
-  if (!hit) { toast("That mark isn't on the part — draw on the model itself."); return; }
-  const mpp = mmPerPxAt(hit.point);
-  const dims = s.type === "arrow" ? {dx: (s.x1 - s.x2) * mpp, dy: (s.y1 - s.y2) * mpp}
-             : s.type === "box" ? {w: s.w * mpp, h: s.h * mpp}
-             : s.type === "circle" ? {r: s.r * mpp}
-             : {rx: s.rx * mpp, ry: s.ry * mpp};
-  // centre offset: the shape centre may not be exactly where the ray hit (searched hit)
-  const n = (marks.length ? marks[marks.length - 1].n : 0) + 1;
-  const m = {n, shape: s.type, dims, size_mm: +(t.px * mpp).toFixed(1)};
-  setAnchor(m, hit);
-  marks.push(m);
-  toast(`Mark #${n} added · drag it to move · describe the fix in the chat`);
+function setPoint(m) {      // true CAD coordinates (mm), what Python / the LLM sees
+  m.point = m.center.clone().add(cadCenter).toArray().map((x) => +x.toFixed(2));
+}
+
+function refreshMark(m) { setPoint(m); buildMarkObject(m); }
+
+function clearMarks(doPublish) {
+  marks.forEach(disposeMark); marks = [];
+  if (doPublish) publish();
+}
+
+function updateBadges() {   // constant on-screen size, hidden while the part is in front of it
+  for (const m of marks) {
+    if (!m.badge) continue;
+    const wp = m.badge.getWorldPosition(new THREE.Vector3());
+    m.badge.scale.setScalar(mmPerPxAt(wp) * 24);
+    if (needsOcc && mesh) {
+      const dir = wp.clone().sub(camera.position), dist = dir.length(); dir.normalize();
+      ray.set(camera.position, dir);
+      const hit = ray.intersectObject(mesh, false)[0];
+      m.badge.visible = !hit || hit.distance > dist - Math.max(r * 0.03, 0.8);
+    }
+  }
+  needsOcc = false;
+}
+
+/* a new mark from a drawn stroke: find the surface it was drawn on, lay the clean shape on that surface */
+function addMarkFromStroke(pts) {
+  if (!mesh) return;
+  const hits = [], step = Math.max(1, Math.floor(pts.length / 28));
+  const probe = (x, y) => { const h = pick(x, y); if (h) hits.push({p: mesh.worldToLocal(h.point.clone()), n: h.face.normal.clone()}); };
+  for (let i = 0; i < pts.length; i += step) probe(pts[i][0], pts[i][1]);
+  probe(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+  if (hits.length < 2) { toast("That mark isn't on the part — draw on the model itself."); return; }
+  // the surface = the biggest group of hits that share (almost) the same normal
+  let best = null;
+  for (const h of hits) {
+    const cnt = hits.reduce((a, o) => a + (h.n.dot(o.n) > 0.97 ? 1 : 0), 0);
+    if (!best || cnt > best.cnt) best = {n: h.n, cnt};
+  }
+  const cl = hits.filter((h) => h.n.dot(best.n) > 0.97);
+  const n = cl.reduce((a, h) => a.add(h.n), new THREE.Vector3()).normalize();
+  const c0 = cl.reduce((a, h) => a.add(h.p), new THREE.Vector3()).multiplyScalar(1 / cl.length);
+  const {u, v} = planeBasis(n);
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, c0);
+  // lift every stroke point onto that plane (also where the stroke crosses a hole), in plane coordinates (mm)
+  const P = [];
+  for (const [x, y] of pts) {
+    const q = rayLocal(x, y).intersectPlane(plane, new THREE.Vector3());
+    if (q) { q.sub(c0); P.push([q.dot(u), q.dot(v)]); }
+  }
+  if (P.length < 4) { toast("Draw on a surface that faces you."); return; }
+  // what the user meant = what they drew on screen (a box stays a box on a tilted face); how big it really is
+  // comes from the stroke lifted onto the surface plane (true millimetres)
+  const type = recognize(pts).type;
+  const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const bw = x1 - x0, bh = y1 - y0, mid = [(x0 + x1) / 2, (y0 + y1) / 2];
+  let ctr, dims, size, shape = type;
+  if (type === "arrow") {
+    const tail = P[0], head = P[P.length - 1];
+    ctr = head; dims = {dx: tail[0] - head[0], dy: tail[1] - head[1]}; size = 0;
+  } else if (type === "box") {   // the four corners of the drawn rectangle, lifted onto the surface (a real quad)
+    const sx = pts.map((p) => p[0]), sy = pts.map((p) => p[1]);
+    const X0 = Math.min(...sx), X1 = Math.max(...sx), Y0 = Math.min(...sy), Y1 = Math.max(...sy);
+    const cq = [[X0, Y0], [X1, Y0], [X1, Y1], [X0, Y1]].map(([x, y]) => {
+      const q = rayLocal(x, y).intersectPlane(plane, new THREE.Vector3());
+      return q ? [q.sub(c0).dot(u), q.sub(c0).dot(v)] : null;
+    });
+    if (cq.some((c) => !c)) { toast("Draw that box on a surface that faces you."); return; }
+    ctr = [(cq[0][0] + cq[2][0]) / 2, (cq[0][1] + cq[2][1]) / 2];
+    const rel = cq.map(([a, b]) => [a - ctr[0], b - ctr[1]]);
+    const w = Math.hypot(cq[1][0] - cq[0][0], cq[1][1] - cq[0][1]), h = Math.hypot(cq[2][0] - cq[1][0], cq[2][1] - cq[1][1]);
+    dims = {w, h, pts: rel}; size = Math.max(w, h) / 2;
+  } else {   // circle / ellipse: a round shape on the surface if it is nearly round there, else an ellipse
+    ctr = mid; const rx = bw / 2, ry = bh / 2;
+    if (Math.abs(rx - ry) <= 0.25 * Math.max(rx, ry)) { shape = "circle"; dims = {r: (rx + ry) / 2}; size = dims.r; }
+    else { shape = "ellipse"; dims = {rx, ry}; size = Math.max(rx, ry); }
+  }
+  const center = c0.clone().addScaledVector(u, ctr[0]).addScaledVector(v, ctr[1]);
+  const num = (marks.length ? marks[marks.length - 1].n : 0) + 1;
+  const m = {n: num, shape, center, normal: n.clone(), dims, size_mm: +size.toFixed(1)};
+  marks.push(m); refreshMark(m);
+  toast(`Mark #${num} added · drag it to move · describe the fix in the chat`);
   publish();
 }
 
-/* screen-space geometry of a mark for drawing and hit-testing */
-function geom(m) {
-  const p = project(m.local), s = p.pxPerMm, d = m.dims || {r: m.size_mm || 3};
-  return {...p, s, d};
+function markAt(x, y) {     // topmost mark under the pointer, tested on the mark's own plane (accurate when tilted)
+  if (!mesh) return null;
+  const rl = rayLocal(x, y), surf = pick(x, y);
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const m = marks[i];
+    const q = rl.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(m.normal, m.center), new THREE.Vector3());
+    if (!q) continue;
+    const wq = mesh.localToWorld(q.clone());
+    if (surf && surf.distance < camera.position.distanceTo(wq) - Math.max(r * 0.03, 0.8)) continue;   // hidden behind the part
+    const {u, v} = planeBasis(m.normal), rel = q.sub(m.center), a = rel.dot(u), b = rel.dot(v);
+    const slack = mmPerPxAt(wq) * 10, d = m.dims || {};
+    // only the outline and the number badge can be grabbed, so new strokes can start inside an existing mark
+    let hit = false, bd;
+    if (m.shape === "circle" || m.shape === "ellipse") {
+      const rx = d.r ?? d.rx, ry = d.r ?? d.ry, rho = Math.hypot(a / rx, b / ry);
+      hit = Math.abs(rho - 1) * Math.min(rx, ry) <= slack || Math.min(rx, ry) <= slack * 1.5 && rho <= 1.3;
+      bd = [rx * 0.72, ry * 0.72];
+    } else if (m.shape === "box") {
+      const q = boxQuad(d, 0.3);
+      hit = [0, 1, 2, 3].some((k) => distToSegment(a, b, q[k], q[(k + 1) % 4]) <= slack);
+      bd = q[2];
+    } else {
+      const L2 = d.dx * d.dx + d.dy * d.dy || 1, tt = Math.max(0, Math.min(1, (a * d.dx + b * d.dy) / L2));
+      hit = Math.hypot(a - tt * d.dx, b - tt * d.dy) <= slack;
+      bd = [d.dx, d.dy];
+    }
+    if (!hit && Math.hypot(a - bd[0], b - bd[1]) <= slack * 1.6) hit = true;   // the number badge
+    if (hit) return {m, a, b};
+  }
+  return null;
 }
 
 /* ---------------- live dimensions: overall width / depth / height on the outer edges ---------------- */
@@ -336,56 +502,14 @@ function drawDims() {
   }
 }
 
-function drawMarks() {
+function drawMarks() {      // 2D overlay: live dimension lines and the stroke being drawn (marks are 3D now)
   ictx.clearRect(0, 0, W, H);
   if (!mesh) return;
   drawDims();
-  for (const m of marks) {
-    const g = geom(m); if (g.behind) continue;
-    const {x, y, s, d} = g;
-    ictx.save();
-    ictx.strokeStyle = m === dragging?.m ? "#E9A585" : "#D27A52"; ictx.lineWidth = 2.5; ictx.lineCap = ictx.lineJoin = "round";
-    ictx.shadowBlur = 0;
-    ictx.beginPath();
-    let bx = x, by = y;   // where to put the number badge
-    if (m.shape === "circle") { const rr = Math.max(d.r * s, 6); ictx.arc(x, y, rr, 0, Math.PI * 2); bx = x + rr * .72; by = y - rr * .72; }
-    else if (m.shape === "ellipse") { const rx = Math.max(d.rx * s, 6), ry = Math.max(d.ry * s, 6); ictx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); bx = x + rx * .72; by = y - ry * .72; }
-    else if (m.shape === "box") { const w = Math.max(d.w * s, 10), h = Math.max(d.h * s, 10);
-      ictx.roundRect ? ictx.roundRect(x - w / 2, y - h / 2, w, h, 6) : ictx.rect(x - w / 2, y - h / 2, w, h); bx = x + w / 2; by = y - h / 2; }
-    else if (m.shape === "arrow") {
-      const x1 = x + d.dx * s, y1 = y + d.dy * s;
-      ictx.moveTo(x1, y1); ictx.lineTo(x, y);
-      const a = Math.atan2(y - y1, x - x1), hl = 14;
-      ictx.moveTo(x, y); ictx.lineTo(x - hl * Math.cos(a - .45), y - hl * Math.sin(a - .45));
-      ictx.moveTo(x, y); ictx.lineTo(x - hl * Math.cos(a + .45), y - hl * Math.sin(a + .45));
-      bx = x1; by = y1;
-    }
-    ictx.stroke(); ictx.shadowBlur = 0;
-    // number badge
-    ictx.fillStyle = "#D27A52"; ictx.beginPath(); ictx.arc(bx, by, 10, 0, Math.PI * 2); ictx.fill();
-    ictx.lineWidth = 2; ictx.strokeStyle = "#0E0E0D"; ictx.stroke();
-    ictx.fillStyle = "#0E0E0D"; ictx.font = "bold 11px system-ui"; ictx.textAlign = "center"; ictx.textBaseline = "middle";
-    ictx.fillText(m.n, bx, by + .5);
-    ictx.restore();
-  }
-  if (stroke) {   // the raw stroke while drawing
+  if (stroke) {
     ictx.strokeStyle = "rgba(210,122,82,.6)"; ictx.lineWidth = 2; ictx.lineJoin = ictx.lineCap = "round";
     ictx.beginPath(); stroke.forEach(([px, py], i) => i ? ictx.lineTo(px, py) : ictx.moveTo(px, py)); ictx.stroke();
   }
-}
-
-function markAt(x, y) {   // topmost mark under the pointer
-  for (let i = marks.length - 1; i >= 0; i--) {
-    const g = geom(marks[i]); if (g.behind) continue;
-    const {d, s} = g;
-    let rad;
-    if (marks[i].shape === "circle") rad = Math.max(d.r * s, 6);
-    else if (marks[i].shape === "ellipse") rad = Math.max(d.rx, d.ry) * s;
-    else if (marks[i].shape === "box") rad = Math.max(d.w, d.h) * s / 2;
-    else rad = 14;
-    if (Math.hypot(x - g.x, y - g.y) <= rad + 8) return {m: marks[i], g};
-  }
-  return null;
 }
 
 /* ---------------- pen: draw new marks, drag existing ones ---------------- */
@@ -395,8 +519,9 @@ ink.addEventListener("pointerdown", (e) => {
   ink.setPointerCapture(e.pointerId);
   const hitMark = markAt(e.offsetX, e.offsetY);
   if (hitMark) {
-    dragging = {m: hitMark.m, offX: e.offsetX - hitMark.g.x, offY: e.offsetY - hitMark.g.y,
-                prev: {local: hitMark.m.local.clone(), normal: hitMark.m.normal, point: hitMark.m.point}};
+    const m = hitMark.m;
+    dragging = {m, ga: hitMark.a, gb: hitMark.b, prev: {center: m.center.clone(), normal: m.normal.clone()}};
+    m.mats[0].color.set(0xE9A585);
     ink.style.cursor = "grabbing";
   } else {
     stroke = [[e.offsetX, e.offsetY]];
@@ -404,9 +529,18 @@ ink.addEventListener("pointerdown", (e) => {
 });
 ink.addEventListener("pointermove", (e) => {
   if (dragging) {
-    const x = e.offsetX - dragging.offX, y = e.offsetY - dragging.offY;
-    const hit = pick(x, y);
-    if (hit) setAnchor(dragging.m, hit);   // follows the surface while dragging
+    const m = dragging.m, hit = pick(e.offsetX, e.offsetY);
+    const q = rayLocal(e.offsetX, e.offsetY).intersectPlane(
+      new THREE.Plane().setFromNormalAndCoplanarPoint(m.normal, m.center), new THREE.Vector3());
+    const onThisFace = q && mesh.geometry.boundingBox.clone().expandByScalar(0.5).containsPoint(q);
+    if (onThisFace) {          // stay on the face's plane (glides straight over holes instead of falling into them)
+      const {u, v} = planeBasis(m.normal);
+      m.center.copy(q).addScaledVector(u, -dragging.ga).addScaledVector(v, -dragging.gb);
+      refreshMark(m); m.mats[0].color.set(0xE9A585);
+    } else if (hit) {          // dragged past the edge of this face: continue on whatever face is under the pointer
+      m.normal.copy(hit.face.normal); m.center.copy(mesh.worldToLocal(hit.point.clone()));
+      dragging.ga = dragging.gb = 0; refreshMark(m); m.mats[0].color.set(0xE9A585);
+    }
     return;
   }
   if (stroke) { stroke.push([e.offsetX, e.offsetY]); return; }
@@ -414,20 +548,21 @@ ink.addEventListener("pointermove", (e) => {
 });
 ink.addEventListener("pointerup", (e) => {
   if (dragging) {
-    const x = e.offsetX - dragging.offX, y = e.offsetY - dragging.offY;
-    if (!pick(x, y)) {   // dropped off the part: put it back
-      Object.assign(dragging.m, dragging.prev);
+    const m = dragging.m;
+    const qd = rayLocal(e.offsetX, e.offsetY).intersectPlane(
+      new THREE.Plane().setFromNormalAndCoplanarPoint(m.normal, m.center), new THREE.Vector3());
+    const okDrop = pick(e.offsetX, e.offsetY) || (qd && mesh.geometry.boundingBox.clone().expandByScalar(0.5).containsPoint(qd));
+    if (!okDrop) {   // dropped off the part: put it back
+      m.center.copy(dragging.prev.center); m.normal.copy(dragging.prev.normal);
       toast("Drop the mark on the part itself.");
-    } else {
-      toast(`Mark #${dragging.m.n} moved`);
-      publish();
-    }
+    } else toast(`Mark #${m.n} moved`);
+    refreshMark(m); publish();
     dragging = null; ink.style.cursor = "grab";
     return;
   }
   if (!stroke) return;
   const pts = stroke; stroke = null;
-  if (pts.length >= 4) addMark(recognize(pts));
+  if (pts.length >= 4) addMarkFromStroke(pts);
 });
 
 /* ---------------- shape recognition (snaps rough strokes to clean shapes) ---------------- */
@@ -454,23 +589,29 @@ function recognize(pts) {
 /* ---------------- sync with Python ---------------- */
 function publish() {
   setValue({model_id: modelId, marks: marks.map(m => ({
-    n: m.n, shape: m.shape, point: m.point, normal: m.normal, size_mm: m.size_mm,
-    dims: Object.fromEntries(Object.entries(m.dims || {}).map(([k, v]) => [k, +v.toFixed(2)])),
+    n: m.n, shape: m.shape, point: m.point, normal: m.normal.toArray().map(x => +x.toFixed(3)), size_mm: m.size_mm,
+    dims: Object.fromEntries(Object.entries(m.dims || {}).filter(([k, v]) => typeof v === "number").map(([k, v]) => [k, +v.toFixed(2)])),
   }))});
 }
 
 function restoreMarks(saved) {   // after an iframe reload (Python already has them, so no publish)
-  marks = saved.map(m => ({...m, local: new THREE.Vector3(...m.point).sub(cadCenter)}));
+  clearMarks(false);
+  for (const s of saved) {
+    const m = {n: s.n, shape: s.shape, normal: new THREE.Vector3(...s.normal).normalize(), size_mm: s.size_mm,
+               center: new THREE.Vector3(...s.point).sub(cadCenter), dims: s.dims || {r: s.size_mm || 3}};
+    marks.push(m); refreshMark(m);
+  }
 }
 
 // debug/inspection hook (handy for automated UI tests)
-window.__viewer = {camera, controls, renderer, scene, get marks() { return marks; }, get dist() { return camera.position.distanceTo(controls.target); }};
+window.__viewer = {camera, controls, renderer, scene, pick, rayLocal, mmPerPxAt, updateBadges, markAt, get marks() { return marks; }, get dist() { return camera.position.distanceTo(controls.target); }};
 
 /* ---------------- render loop + Streamlit render events ---------------- */
 (function loop() {
   requestAnimationFrame(loop);
   applyZoom();
   controls.update();
+  updateBadges();
   renderer.render(scene, camera);
   drawMarks();
 })();
