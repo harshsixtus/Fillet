@@ -26,6 +26,7 @@ import llm
 import sandbox
 import ui_art
 import print_check
+import ar
 import share
 from llm import CodeGenerator
 from pipeline import MAX_REPAIRS, run_pipeline
@@ -228,6 +229,15 @@ def share_panel(f: dict) -> None:
                        "fillet_model.zip", "application/zip", use_container_width=True)
     s2.download_button("Viewer page (.html)", share.build_html(out_dir / "model.stl", f["prompt"], f["metrics"]),
                        "fillet_viewer.html", "text/html", use_container_width=True)
+    glb = ar.build_glb(out_dir / "model.stl")
+    a1, a2 = st.columns(2)
+    a1.download_button("AR page (.html)", share.build_ar_html(glb, f["prompt"], f["metrics"]),
+                       "fillet_ar.html", "text/html", use_container_width=True,
+                       help="Open on a phone, tap 'View in your space' and the part appears at real size.")
+    a2.download_button("3D model (.glb)", glb, "fillet_model.glb", "model/gltf-binary", use_container_width=True,
+                       help="True-scale glTF for AR/VR apps, Blender and game engines.")
+    st.caption("AR: open the AR page on your phone to place the part at real size. "
+               "VR: the viewer page shows an Enter VR button on a headset browser.")
 
 
 def export_panel(f: dict) -> None:

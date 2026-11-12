@@ -18,7 +18,7 @@ VIEWER_HTML = """
 </style>
 <div id="wrap">
  <div id="dims">__DIMS__</div>
- <div id="bar"><button id="rot" class="on">Rotate</button><button id="wire">Wireframe</button><button id="reset">Reset view</button></div>
+ <div id="bar"><button id="rot" class="on">Rotate</button><button id="wire">Wireframe</button><button id="reset">Reset view</button><button id="vr" style="display:none">Enter VR</button></div>
  <div id="hint">drag: rotate · scroll: zoom · right-drag: pan</div>
 </div>
 <script type="importmap">{"imports":{
@@ -63,7 +63,21 @@ rot.onclick = () => { controls.autoRotate = !controls.autoRotate; rot.classList.
 wire.onclick = () => { mat.wireframe = !mat.wireframe; edges.visible = !mat.wireframe; wire.classList.toggle("on", mat.wireframe); };
 document.getElementById("reset").onclick = () => { camera.position.copy(home); controls.target.set(0, 0, 0); };
 renderer.domElement.addEventListener("pointerdown", () => { controls.autoRotate = false; rot.classList.remove("on"); });
-(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+// VR: headset sessions run in metres, so shrink the millimetre scene 1000x and float it at arm's length.
+renderer.xr.enabled = true;
+const vr = document.getElementById("vr");
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported("immersive-vr").then(ok => { if (ok) vr.style.display = ""; }).catch(() => {});
+}
+vr.onclick = async () => {
+  try {
+    const session = await navigator.xr.requestSession("immersive-vr", {optionalFeatures: ["local-floor"]});
+    session.addEventListener("end", () => { scene.scale.setScalar(1); scene.position.set(0, 0, 0); controls.enabled = true; });
+    scene.scale.setScalar(0.001); scene.position.set(0, 1.2, -1.0); controls.enabled = false;
+    await renderer.xr.setSession(session);
+  } catch (e) { vr.textContent = "VR unavailable"; }
+};
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
 </script>
 """
 
