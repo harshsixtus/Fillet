@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 import library
 import about
@@ -229,15 +230,24 @@ def share_panel(f: dict) -> None:
                        "fillet_model.zip", "application/zip", use_container_width=True)
     s2.download_button("Viewer page (.html)", share.build_html(out_dir / "model.stl", f["prompt"], f["metrics"]),
                        "fillet_viewer.html", "text/html", use_container_width=True)
+
+
+def ar_panel(f: dict) -> None:
+    """AR / VR tab: true-size viewer plus the files to open it on a phone or headset."""
+    out_dir = Path(f["out_dir"])
     glb = ar.build_glb(out_dir / "model.stl")
-    a1, a2 = st.columns(2)
-    a1.download_button("AR page (.html)", share.build_ar_html(glb, f["prompt"], f["metrics"]),
-                       "fillet_ar.html", "text/html", use_container_width=True,
-                       help="Open on a phone, tap 'View in your space' and the part appears at real size.")
+    page = share.build_ar_html(glb, f["prompt"], f["metrics"])
+    st.caption("Shown at real size. On a phone, open the AR page and tap 'View in your space' to place the part "
+               "on your desk or floor. On a VR headset, open the viewer page and press Enter VR.")
+    components.html(page, height=620)
+    a1, a2, a3 = st.columns(3)
+    a1.download_button("AR page (.html)", page, "fillet_ar.html", "text/html", use_container_width=True,
+                       type="primary", help="Open on a phone, tap 'View in your space' and the part appears at real size.")
     a2.download_button("3D model (.glb)", glb, "fillet_model.glb", "model/gltf-binary", use_container_width=True,
                        help="True-scale glTF for AR/VR apps, Blender and game engines.")
-    st.caption("AR: open the AR page on your phone to place the part at real size. "
-               "VR: the viewer page shows an Enter VR button on a headset browser.")
+    a3.download_button("VR viewer (.html)", share.build_html(out_dir / "model.stl", f["prompt"], f["metrics"]),
+                       "fillet_vr_viewer.html", "text/html", use_container_width=True,
+                       help="Open in a headset browser and press Enter VR.")
 
 
 def export_panel(f: dict) -> None:
@@ -693,7 +703,7 @@ with right:
     with st.container(key="previewpane"):
         if f:
             x, y, z = f["metrics"]["bbox_mm"]
-            tab3d, tab2d = st.tabs(["3D preview", "Drawings"])
+            tab3d, tab2d, tabar = st.tabs(["3D preview", "Drawings", "AR / VR"])
             with tab3d:
                 marks = cad_viewer(Path(f["stl_path"]), model_id=f"{ss.viewer_nonce}:{f['out_dir']}",
                                    dims=f"{x:g} × {y:g} × {z:g} mm", key=f"viewer_{ss.viewer_nonce}")
@@ -702,6 +712,8 @@ with right:
                     with st.spinner("Finishing the drawings…"):
                         sandbox.wait_exports(Path(f["out_dir"]))
                 drawing_preview(Path(f["out_dir"]))
+            with tabar:
+                ar_panel(f)
             show_metrics(f["metrics"])
             if f["metrics"].get("num_solids", 1) > 1:
                 if st.button(f"Join the {f['metrics']['num_solids']} pieces into one solid", type="primary",
