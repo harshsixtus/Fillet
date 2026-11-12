@@ -236,7 +236,8 @@ def ar_panel(f: dict) -> None:
     """AR / VR tab: true-size viewer plus the files to open it on a phone or headset."""
     out_dir = Path(f["out_dir"])
     glb = ar.build_glb(out_dir / "model.stl")
-    page = share.build_ar_html(glb, f["prompt"], f["metrics"])
+    bx, by, bz = f["metrics"]["bbox_mm"]
+    page = ar.ar_page(glb, f"{bx:g} × {by:g} × {bz:g} mm", f["prompt"])
     st.caption("Shown at real size. On a phone, open the AR page and tap 'View in your space' to place the part "
                "on your desk or floor. On a VR headset, open the viewer page and press Enter VR.")
     components.html(page, height=620)
